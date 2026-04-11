@@ -128,6 +128,43 @@ $(TWOBODY_EXE): $(OBJ_DIR)/two_body_solver.o $(OBJ_DIR)/test_main.o $(COMMON_OBJ
 	@echo "Built: $@"
 
 # ============================================================================
+# BENCHMARK TARGETS
+# ============================================================================
+
+# Run benchmark suite
+benchmark: all
+	@echo "Running benchmark suite..."
+	@python3 benchmark.py --run --force
+
+# Run benchmark and generate plots
+benchmark-full: all
+	@echo "Running full benchmark suite with plots..."
+	@python3 benchmark.py --force
+
+# Run benchmark plots only (if CSV exists)
+plots:
+	@echo "Generating plots from existing benchmark data..."
+	@python3 benchmark.py --plot
+
+# Quick benchmark runner (uses shell script)
+quick-benchmark:
+	@echo "Running quick benchmark suite..."
+	@./run_benchmarks.sh
+
+# Quick benchmark with SYCL
+quick-benchmark-sycl:
+	@echo "Running quick benchmark suite with SYCL..."
+	@./run_benchmarks.sh --with-sycl
+
+# Clean benchmark results
+clean-benchmark:
+	@echo "Cleaning benchmark results..."
+	rm -rf benchmark_results
+
+# Full clean including benchmarks
+clean-all: clean clean-benchmark
+
+# ============================================================================
 # UTILITY TARGETS
 # ============================================================================
 
@@ -174,6 +211,12 @@ help:
 	@echo "  run-openmp       - Build and run OpenMP version"
 	@echo "  run-sycl         - Build and run SYCL version (requires Intel oneAPI)"
 	@echo "  run-twobody      - Build and run Two-body solver"
+	@echo "  benchmark        - Run benchmark suite and save results"
+	@echo "  benchmark-full   - Run benchmark suite and generate plots"
+	@echo "  plots            - Generate plots from existing benchmark data"
+	@echo "  quick-benchmark  - Quick benchmark runner (build + run + plot)"
+	@echo "  quick-benchmark-sycl - Quick benchmark with SYCL support"
+	@echo "  clean-benchmark  - Remove benchmark results"
 	@echo ""
 	@echo "Configuration variables:"
 	@echo "  CXX              - C++ compiler (default: g++)"
@@ -184,6 +227,9 @@ help:
 	@echo "Examples:"
 	@echo "  make all                              # Build all main versions"
 	@echo "  make all-sycl                         # Build with SYCL support"
+	@echo "  make benchmark-full                   # Run full benchmark with plots"
+	@echo "  make quick-benchmark                  # Quick automated benchmark"
+	@echo "  make quick-benchmark-sycl             # Quick benchmark with SYCL"
 	@echo "  make run-serial                       # Run serial version"
 	@echo "  make CXX=clang++ all                  # Use clang compiler"
 	@echo "  make clean && make all                # Clean rebuild"
@@ -204,4 +250,4 @@ check-compilers:
 # PHONY TARGETS
 # ============================================================================
 
-.PHONY: all all-sycl clean run run-serial run-openmp run-sycl run-twobody help check-compilers
+.PHONY: all all-sycl clean run run-serial run-openmp run-sycl run-twobody help check-compilers benchmark benchmark-full plots quick-benchmark quick-benchmark-sycl clean-benchmark clean-all setup
