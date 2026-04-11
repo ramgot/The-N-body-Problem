@@ -18,8 +18,8 @@ CXXFLAGS_SYCL = -std=c++17 -Wall -Wextra -O2 -fsycl
 
 # Directories
 COMMON_DIR = Common
-NBODY_DIR = The N-body Problem Numerical Solution
-TWOBODY_DIR = The Two-body Problem Analytical Solution
+NBODY_DIR = N-body-Numerical-Solution
+TWOBODY_DIR = Two-body-Analytical-Solution
 OBJ_DIR = obj
 BUILD_DIR = build
 

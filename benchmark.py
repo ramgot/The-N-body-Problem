@@ -116,11 +116,13 @@ def run_simulation(method: str, n_bodies: int, t_hours: float):
 
     t_max_s = t_hours * 3600.0
     scenario = SCENARIO_BY_N.get(n_bodies, "random")
-    command = [str(exe_path), str(n_bodies), str(FIXED_DT), str(t_max_s), scenario]
+    command = [str(exe_path), str(n_bodies), str(FIXED_DT), str(t_max_s)]
 
     if method == "openmp":
         threads = os.cpu_count() or 1
         command.append(str(threads))
+
+    command.append(scenario)
 
     print(f"Running {method} | N={n_bodies} | T={t_hours}h | cmd={command}")
     process = subprocess.run(command, capture_output=True, text=True)
