@@ -47,6 +47,9 @@ namespace InitialConditions {
     std::vector<Body> twoBodyCircular(double m1, double m2, double distance, double t0 = 0.0);
     std::vector<Body> twoBodyElliptical(double m1, double m2, double a, double e, double t0 = 0.0);
     std::vector<Body> plummerSphere(size_t N, double total_mass, double scale_radius);
+    std::vector<Body> sunEarthMoon();
+    std::vector<Body> solarSystem();
+    std::vector<Body> randomSphere(size_t N, double total_mass, double radius, unsigned int seed = 0);
 }
 
 #endif // BODY_H
