@@ -6,6 +6,7 @@
 #include <cmath>
 #include <chrono>
 #include <stdexcept>
+#include <string>
 #include <sycl/sycl.hpp>
 
 // ========================================
@@ -27,11 +28,23 @@ private:
     sycl::buffer<double> mass;
 
     sycl::queue q;
+    size_t compute_units;
 
 public:
     NBodySimulationSYCL(const std::vector<Body>& initial_bodies, double dt_, double t_max_, double soft_)
         : bodies(initial_bodies), num_bodies(initial_bodies.size()), dt(dt_), t_max(t_max_), softening(soft_),
           pos_x(sycl::range<1>(num_bodies)),
+          pos_y(sycl::range<1>(num_bodies)),
+          pos_z(sycl::range<1>(num_bodies)),
+          vel_x(sycl::range<1>(num_bodies)),
+          vel_y(sycl::range<1>(num_bodies)),
+          vel_z(sycl::range<1>(num_bodies)),
+          acc_x(sycl::range<1>(num_bodies)),
+          acc_y(sycl::range<1>(num_bodies)),
+          acc_z(sycl::range<1>(num_bodies)),
+          mass(sycl::range<1>(num_bodies)),
+          q(sycl::gpu_selector_v),
+          compute_units(q.get_device().get_info<sycl::info::device::max_compute_units>())
           pos_y(sycl::range<1>(num_bodies)),
           pos_z(sycl::range<1>(num_bodies)),
           vel_x(sycl::range<1>(num_bodies)),
@@ -220,17 +233,20 @@ public:
         std::cout << "> End integrationStep..." << std::endl;
     }
 
-    void run() {
+    PerformanceMetrics run() {
+        PerformanceMetrics metrics;
         size_t steps = static_cast<size_t>(t_max / dt);
         std::cout << "Starting simulation on device: " 
                   << q.get_device().get_info<sycl::info::device::name>() << std::endl;
         std::cout << "Total steps: " << steps << std::endl;
 
+        SystemState initial_state(bodies, 0.0);
+        initial_state.computeConservedQuantities();
+
         auto start_time = std::chrono::high_resolution_clock::now();
 
         computeAccelerations();
         q.wait_and_throw();
-
 
         std::cout << "Start loop..." << std::endl;
         for(size_t step = 0; step < steps; ++step){
@@ -244,38 +260,63 @@ public:
         std::cout << "\rProgress: 100%" << std::endl;
 
         auto end_time = std::chrono::high_resolution_clock::now();
-        double elapsed = std::chrono::duration<double>(end_time - start_time).count();
-        std::cout << "Execution time: " << elapsed << " s" << std::endl;
+        metrics.execution_time = std::chrono::duration<double>(end_time - start_time).count();
+
+        // Read back final state from device buffers
+        auto posx = pos_x.get_host_access(sycl::read_only);
+        auto posy = pos_y.get_host_access(sycl::read_only);
+        auto posz = pos_z.get_host_access(sycl::read_only);
+        auto velx = vel_x.get_host_access(sycl::read_only);
+        auto vely = vel_y.get_host_access(sycl::read_only);
+        auto velz = vel_z.get_host_access(sycl::read_only);
+
+        for (size_t i = 0; i < num_bodies; ++i) {
+            bodies[i].position = Vector3(posx[i], posy[i], posz[i]);
+            bodies[i].velocity = Vector3(velx[i], vely[i], velz[i]);
+        }
+
+        SystemState final_state(bodies, t_max);
+        final_state.computeConservedQuantities();
+        metrics.energy_error = final_state.energyError(initial_state);
+        metrics.steps_completed = steps;
+
+        double operations_per_pair = 20.0;
+        double operations_per_body = 10.0;
+        double total_pairs = 0.5 * num_bodies * (num_bodies - 1);
+        metrics.flops = steps * (total_pairs * operations_per_pair + num_bodies * operations_per_body);
+        metrics.gflops = metrics.flops / metrics.execution_time / 1e9;
+
+        return metrics;
     }
+
+    size_t getComputeUnits() const { return compute_units; }
 };
 
 // ========================================
-// Helper function to create test bodies
+// Scenario-based initial conditions
 // ========================================
-std::vector<Body> createTestBodies(size_t N) {
-    std::vector<Body> bodies(N);
-    double mass = SOLAR_MASS;
-
-    int grid_size = static_cast<int>(std::ceil(std::pow(N, 1.0/3.0)));
-    double spacing = AU * 0.1;
-
-    size_t index = 0;
-    for(int i=0;i<grid_size && index<N;i++)
-    for(int j=0;j<grid_size && index<N;j++)
-    for(int k=0;k<grid_size && index<N;k++){
-        Vector3 pos(
-            (i - grid_size/2.0)*spacing,
-            (j - grid_size/2.0)*spacing,
-            (k - grid_size/2.0)*spacing
-        );
-        Vector3 vel(
-            (rand()/(double)RAND_MAX - 0.5)*1000,
-            (rand()/(double)RAND_MAX - 0.5)*1000,
-            (rand()/(double)RAND_MAX - 0.5)*1000
-        );
-        bodies[index++] = Body(pos, vel, mass);
+std::vector<Body> createScenarioBodies(size_t N, const std::string& scenario) {
+    if (scenario == "auto") {
+        if (N == 3) {
+            return InitialConditions::sunEarthMoon();
+        }
+        if (N == 10) {
+            return InitialConditions::solarSystem();
+        }
+        return InitialConditions::randomSphere(N, SOLAR_MASS * 0.01 * N, AU * 2.0, 12345);
     }
-    return bodies;
+    if (scenario == "sun-earth-moon") {
+        return InitialConditions::sunEarthMoon();
+    }
+    if (scenario == "solar-system") {
+        return InitialConditions::solarSystem();
+    }
+    if (scenario == "random") {
+        return InitialConditions::randomSphere(N, SOLAR_MASS * 0.01 * N, AU * 2.0, 12345);
+    }
+
+    std::cerr << "Unknown scenario '" << scenario << "', using random initial conditions." << std::endl;
+    return InitialConditions::randomSphere(N, SOLAR_MASS * 0.01 * N, AU * 2.0, 12345);
 }
 
 // ========================================
@@ -286,20 +327,32 @@ int main(int argc, char** argv){
         size_t n_bodies = 1000;
         double dt = 3600.0;
         double t_max = 24*3600;
+        std::string scenario = "auto";
 
         if(argc > 1) n_bodies = std::stoul(argv[1]);
         if(argc > 2) dt = std::stod(argv[2]);
         if(argc > 3) t_max = std::stod(argv[3]);
+        if(argc > 4) scenario = argv[4];
 
         std::cout << "N-Body Simulation (SYCL Velocity Verlet)" << std::endl;
         std::cout << "Number of bodies: " << n_bodies << std::endl;
         std::cout << "Time step: " << dt << " s" << std::endl;
         std::cout << "Total time: " << t_max/3600 << " hours" << std::endl;
+        std::cout << "Scenario: " << scenario << std::endl;
 
-        std::vector<Body> bodies = createTestBodies(n_bodies);
+        std::vector<Body> bodies = createScenarioBodies(n_bodies, scenario);
 
         NBodySimulationSYCL simulation(bodies, dt, t_max, 1e3);
-        simulation.run();
+        PerformanceMetrics metrics = simulation.run();
+
+        std::cout << "\nResults:" << std::endl;
+        std::cout << "--------" << std::endl;
+        std::cout << "Execution time: " << metrics.execution_time << " seconds" << std::endl;
+        std::cout << "Performance: " << metrics.gflops << " GFLOP/s" << std::endl;
+        std::cout << "Energy error: " << metrics.energy_error << std::endl;
+        std::cout << "Steps completed: " << metrics.steps_completed << std::endl;
+        std::cout << "Compute units: " << simulation.getComputeUnits() << std::endl;
+
         return 0;
     } catch (const sycl::exception& e) {
         std::cerr << "SYCL error: " << e.what() << std::endl;

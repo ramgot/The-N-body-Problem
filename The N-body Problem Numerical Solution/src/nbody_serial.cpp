@@ -5,6 +5,7 @@
 #include <chrono>
 #include <vector>
 #include <cmath>
+#include <string>
 
 class NBodySimulationSerial {
 private:
@@ -128,62 +129,52 @@ public:
     const SystemState& getState() const { return current_state; }
 };
 
-// Упрощенная инициализация для тестирования
-std::vector<Body> createTestBodies(size_t N) {
-    std::vector<Body> bodies(N);
-    double mass = SOLAR_MASS; // Одинаковая масса для всех
-    
-    std::cout << "Creating " << N << " test bodies..." << std::endl;
-    
-    // Простая кубическая решетка для тестирования
-    int grid_size = static_cast<int>(std::ceil(std::pow(N, 1.0/3.0)));
-    double spacing = AU * 0.1; // Расстояние между телами
-    
-    size_t index = 0;
-    for (int i = 0; i < grid_size && index < N; ++i) {
-        for (int j = 0; j < grid_size && index < N; ++j) {
-            for (int k = 0; k < grid_size && index < N; ++k) {
-                Vector3 pos(
-                    (i - grid_size/2.0) * spacing,
-                    (j - grid_size/2.0) * spacing,
-                    (k - grid_size/2.0) * spacing
-                );
-                
-                // Небольшие случайные скорости
-                Vector3 vel(
-                    (rand() / (double)RAND_MAX - 0.5) * 1000,
-                    (rand() / (double)RAND_MAX - 0.5) * 1000,
-                    (rand() / (double)RAND_MAX - 0.5) * 1000
-                );
-                
-                bodies[index++] = Body(pos, vel, mass);
-            }
+// Select an initial condition scenario for N-body simulation
+std::vector<Body> createScenarioBodies(size_t N, const std::string& scenario) {
+    if (scenario == "auto") {
+        if (N == 3) {
+            return InitialConditions::sunEarthMoon();
         }
+        if (N == 10) {
+            return InitialConditions::solarSystem();
+        }
+        return InitialConditions::randomSphere(N, SOLAR_MASS * 0.01 * N, AU * 2.0, 12345);
     }
-    
-    std::cout << "Created " << index << " bodies" << std::endl;
-    return bodies;
+    if (scenario == "sun-earth-moon") {
+        return InitialConditions::sunEarthMoon();
+    }
+    if (scenario == "solar-system") {
+        return InitialConditions::solarSystem();
+    }
+    if (scenario == "random") {
+        return InitialConditions::randomSphere(N, SOLAR_MASS * 0.01 * N, AU * 2.0, 12345);
+    }
+
+    std::cerr << "Unknown scenario '" << scenario << "', using random initial conditions." << std::endl;
+    return InitialConditions::randomSphere(N, SOLAR_MASS * 0.01 * N, AU * 2.0, 12345);
 }
 
 int main(int argc, char** argv) {
-    // Параметры по умолчанию для тестирования
-    size_t n_bodies = 100;  // Уменьшил для тестирования
-    double dt = 3600.0;      // 1 час
-    double t_max = 24 * 3600; // 1 день (вместо года)
+    // Default simulation parameters
+    size_t n_bodies = 100;
+    double dt = 3600.0;
+    double t_max = 24 * 3600; // 1 day
+    std::string scenario = "auto";
 
     // Parse command line arguments
     if (argc > 1) n_bodies = std::stoul(argv[1]);
     if (argc > 2) dt = std::stod(argv[2]);
     if (argc > 3) t_max = std::stod(argv[3]);
+    if (argc > 4) scenario = argv[4];
 
-    std::cout << "N-Body Simulation (Serial Version - Test Mode)" << std::endl;
-    std::cout << "==============================================" << std::endl;
+    std::cout << "N-Body Simulation (Serial Version)" << std::endl;
+    std::cout << "================================" << std::endl;
     std::cout << "Number of bodies: " << n_bodies << std::endl;
     std::cout << "Time step: " << dt << " s" << std::endl;
     std::cout << "Total time: " << t_max / 3600 << " hours" << std::endl;
+    std::cout << "Scenario: " << scenario << std::endl;
 
-    // Создаем тестовые тела
-    std::vector<Body> bodies = createTestBodies(n_bodies);
+    std::vector<Body> bodies = createScenarioBodies(n_bodies, scenario);
 
     SimulationParams params(n_bodies, dt, t_max);
     NBodySimulationSerial simulation(bodies, params);

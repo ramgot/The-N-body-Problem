@@ -1,6 +1,7 @@
 #include "../include/body.h"
 #include "../include/common.h"
 #include <cmath>
+#include <random>
 #include <stdexcept>
 
 Body::Body() : mass(0.0) {
@@ -161,6 +162,97 @@ namespace InitialConditions {
             );
 
             bodies[i] = Body(pos, vel, mass_per_body);
+        }
+
+        return bodies;
+    }
+
+    std::vector<Body> sunEarthMoon() {
+        const double m_sun = SOLAR_MASS;
+        const double m_earth = EARTH_MASS;
+        const double m_moon = 7.3477e22;
+        const double earth_semi_major = AU;
+        const double moon_distance = 384400e3;
+        const double earth_speed = 29.78e3;
+        const double moon_speed = 1.022e3;
+
+        Vector3 earth_pos(earth_semi_major, 0, 0);
+        Vector3 moon_pos = earth_pos + Vector3(moon_distance, 0, 0);
+        Vector3 earth_vel(0, earth_speed, 0);
+        Vector3 moon_vel(0, earth_speed + moon_speed, 0);
+
+        Vector3 sun_vel = -(earth_vel * m_earth + moon_vel * m_moon) / m_sun;
+
+        std::vector<Body> bodies(3);
+        bodies[0] = Body(Vector3(0, 0, 0), sun_vel, m_sun);
+        bodies[1] = Body(earth_pos, earth_vel, m_earth);
+        bodies[2] = Body(moon_pos, moon_vel, m_moon);
+        return bodies;
+    }
+
+    std::vector<Body> solarSystem() {
+        struct PlanetInfo { const char* name; double a_au; double mass; };
+        const PlanetInfo planets[] = {
+            {\"Mercury\", 0.387, 3.3011e23},
+            {\"Venus\",   0.723, 4.8675e24},
+            {\"Earth\",   1.000, 5.9724e24},
+            {\"Mars\",    1.524, 6.4171e23},
+            {\"Jupiter\", 5.204, 1.8982e27},
+            {\"Saturn\",  9.582, 5.6834e26},
+            {\"Uranus\", 19.201, 8.6810e25},
+            {\"Neptune\",30.047, 1.02413e26},
+            {\"Pluto\",  39.48,  1.303e22},
+        };
+
+        std::vector<Body> bodies;
+        bodies.reserve(1 + sizeof(planets) / sizeof(planets[0]));
+
+        // Sun at origin; velocity adjusted after planets are initialized
+        bodies.emplace_back(Vector3(0, 0, 0), Vector3(0, 0, 0), SOLAR_MASS);
+
+        for (const auto& planet : planets) {
+            double radius = planet.a_au * AU;
+            double speed = std::sqrt(G * SOLAR_MASS / radius);
+            bodies.emplace_back(Vector3(radius, 0, 0), Vector3(0, speed, 0), planet.mass);
+        }
+
+        Vector3 total_momentum(0, 0, 0);
+        for (size_t i = 1; i < bodies.size(); ++i) {
+            total_momentum += bodies[i].velocity * bodies[i].mass;
+        }
+        bodies[0].velocity = -total_momentum / bodies[0].mass;
+        return bodies;
+    }
+
+    std::vector<Body> randomSphere(size_t N, double total_mass, double radius, unsigned int seed) {
+        std::mt19937_64 rng(seed ? seed : 123456789);
+        std::uniform_real_distribution<double> unit(0.0, 1.0);
+        std::uniform_real_distribution<double> direction(-1.0, 1.0);
+
+        std::vector<Body> bodies;
+        bodies.reserve(N);
+        double mass_per_body = total_mass / static_cast<double>(N);
+
+        for (size_t i = 0; i < N; ++i) {
+            double u = unit(rng);
+            double r = radius * std::cbrt(u);
+            double theta = std::acos(direction(rng));
+            double phi = 2.0 * M_PI * unit(rng);
+
+            Vector3 pos(
+                r * std::sin(theta) * std::cos(phi),
+                r * std::sin(theta) * std::sin(phi),
+                r * std::cos(theta)
+            );
+
+            double speed = std::sqrt(G * total_mass / (r + 1e6));
+            Vector3 vel(
+                speed * std::sin(theta) * std::cos(phi),
+                speed * std::sin(theta) * std::sin(phi),
+                speed * std::cos(theta)
+            );
+
+            bodies.emplace_back(pos, vel, mass_per_body);
         }
 
         return bodies;

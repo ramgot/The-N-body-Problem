@@ -1,0 +1,372 @@
+#!/usr/bin/env python3
+"""Benchmark runner and plotter for N-body implementations.
+
+Usage:
+  python benchmark.py --run   # run benchmarks and save CSV
+  python benchmark.py --plot  # load CSV and draw graphs
+  python benchmark.py         # run and plot if possible
+"""
+
+import argparse
+import csv
+import datetime
+import os
+import re
+import subprocess
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+
+# Benchmark configuration
+FIXED_DT = 3600.0  # seconds (1 hour)
+NS = [3, 10, 100, 1000]
+# Total simulation times in hours. Эта сетка задаёт размер эксперимента по времени.
+TIMES_HOURS = [24, 168, 720, 8760]  # 1 day, 7 days, 30 days, 365 days
+
+METHODS = {
+    "serial": "nbody_serial",
+    "openmp": "nbody_openmp",
+    "sycl": "nbody_sycl",
+}
+
+SCENARIO_BY_N = {
+    3: "sun-earth-moon",
+    10: "solar-system",
+    100: "random",
+    1000: "random",
+}
+
+CSV_HEADERS = [
+    "timestamp",
+    "method",
+    "executable",
+    "n_bodies",
+    "scenario",
+    "t_hours",
+    "dt_s",
+    "t_max_s",
+    "execution_time_s",
+    "gflops",
+    "energy_error",
+    "steps_completed",
+    "threads",
+    "compute_units",
+    "command",
+]
+
+RESULTS_DIR = Path("benchmark_results")
+PLOTS_DIR = RESULTS_DIR / "plots"
+CSV_PATH = RESULTS_DIR / "benchmark_results.csv"
+
+OUTPUT_PATTERNS = {
+    "execution_time_s": re.compile(r"Execution time:\s*([0-9.eE+-]+)\s*seconds"),
+    "gflops": re.compile(r"Performance:\s*([0-9.eE+-]+)\s*GFLOP/s"),
+    "energy_error": re.compile(r"Energy error:\s*([0-9.eE+-]+)"),
+    "steps_completed": re.compile(r"Steps completed:\s*(\d+)"),
+}
+OPTIONAL_PATTERNS = {
+    "threads": re.compile(r"Threads:\s*(\d+)"),
+    "compute_units": re.compile(r"Compute units:\s*(\d+)"),
+}
+
+
+def scenario_label(n):
+    if n == 3:
+        return "Sun-Earth-Moon"
+    if n == 10:
+        return "Solar system + Pluto"
+    if n == 100:
+        return "Random test (100 bodies)"
+    if n == 1000:
+        return "Random test (1000 bodies)"
+    return f"N={n}"
+
+
+def find_executable(exe_name: str) -> Path | None:
+    root = Path.cwd()
+    candidates = [root / exe_name, root / "build" / exe_name, root / "bin" / exe_name]
+    for candidate in candidates:
+        if candidate.exists() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def parse_metrics(output: str):
+    data = {}
+    for key, pattern in OUTPUT_PATTERNS.items():
+        match = pattern.search(output)
+        if not match:
+            raise ValueError(f"Unable to parse '{key}' from output")
+        value = match.group(1)
+        data[key] = float(value) if key != "steps_completed" else int(value)
+
+    for key, pattern in OPTIONAL_PATTERNS.items():
+        match = pattern.search(output)
+        data[key] = int(match.group(1)) if match else 0
+
+    return data
+
+
+def run_simulation(method: str, n_bodies: int, t_hours: float):
+    exe_name = METHODS[method]
+    exe_path = find_executable(exe_name)
+    if exe_path is None:
+        print(f"Warning: executable for method '{method}' not found. Skipping.")
+        return None
+
+    t_max_s = t_hours * 3600.0
+    scenario = SCENARIO_BY_N.get(n_bodies, "random")
+    command = [str(exe_path), str(n_bodies), str(FIXED_DT), str(t_max_s), scenario]
+
+    if method == "openmp":
+        threads = os.cpu_count() or 1
+        command.append(str(threads))
+
+    print(f"Running {method} | N={n_bodies} | T={t_hours}h | cmd={command}")
+    process = subprocess.run(command, capture_output=True, text=True)
+    if process.returncode != 0:
+        raise RuntimeError(
+            f"Benchmark failed for {exe_name} N={n_bodies} T={t_hours}h\n"
+            f"stdout:\n{process.stdout}\n"
+            f"stderr:\n{process.stderr}"
+        )
+
+    metrics = parse_metrics(process.stdout)
+    metrics.update({
+        "timestamp": datetime.datetime.now().isoformat(),
+        "method": method,
+        "executable": exe_name,
+        "n_bodies": n_bodies,
+        "scenario": scenario_label(n_bodies),
+        "t_hours": t_hours,
+        "dt_s": FIXED_DT,
+        "t_max_s": t_max_s,
+        "threads": metrics.get("threads", 0),
+        "compute_units": metrics.get("compute_units", 0),
+        "command": " ".join(command),
+    })
+    return metrics
+
+
+def save_results(rows):
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    write_header = not CSV_PATH.exists()
+    with CSV_PATH.open("a", newline="", encoding="utf-8") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=CSV_HEADERS)
+        if write_header:
+            writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row.get(k, "") for k in CSV_HEADERS})
+    print(f"Saved {len(rows)} rows to {CSV_PATH}")
+
+
+def load_results():
+    if not CSV_PATH.exists():
+        raise FileNotFoundError(f"Benchmark CSV not found: {CSV_PATH}")
+    rows = []
+    with CSV_PATH.open("r", newline="", encoding="utf-8") as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            row["n_bodies"] = int(row["n_bodies"])
+            row["t_hours"] = float(row["t_hours"])
+            row["dt_s"] = float(row["dt_s"])
+            row["t_max_s"] = float(row["t_max_s"])
+            row["execution_time_s"] = float(row["execution_time_s"])
+            row["gflops"] = float(row["gflops"])
+            row["energy_error"] = float(row["energy_error"])
+            row["steps_completed"] = int(row["steps_completed"])
+            row["threads"] = int(row["threads"]) if row.get("threads") else 0
+            row["compute_units"] = int(row["compute_units"]) if row.get("compute_units") else 0
+            rows.append(row)
+    return rows
+
+
+def plot_line(rows, x_key, y_key, title, ylabel, filename, logx=False, logy=False, group_by="method"):
+    groups = {}
+    for row in rows:
+        if group_by == "method_t_hours":
+            label = f"{row['method']} T={int(row['t_hours'])}h"
+        else:
+            label = row[group_by]
+        groups.setdefault(label, []).append(row)
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    for label, group_rows in sorted(groups.items()):
+        sorted_rows = sorted(group_rows, key=lambda x: (x["n_bodies"], x["t_hours"]))
+        xs = [r[x_key] for r in sorted_rows]
+        ys = [r[y_key] for r in sorted_rows]
+        ax.plot(xs, ys, marker="o", label=label)
+
+    ax.set_title(title)
+    ax.set_xlabel("Number of bodies (N)" if x_key == "n_bodies" else x_key)
+    ax.set_ylabel(ylabel)
+    if logx:
+        ax.set_xscale("log")
+    if logy:
+        ax.set_yscale("log")
+    ax.grid(True, which="both", linestyle="--", alpha=0.4)
+    ax.legend(fontsize="small", loc="best")
+    fig.tight_layout()
+    filepath = PLOTS_DIR / filename
+    fig.savefig(filepath)
+    print(f"Saved plot {filepath}")
+    return fig
+
+
+def plot_speedup(rows, filename):
+    serial_rows = [r for r in rows if r["method"] == "serial"]
+    openmp_rows = [r for r in rows if r["method"] == "openmp"]
+    serial_map = {(r["n_bodies"], r["t_hours"]): r for r in serial_rows}
+    openmp_map = {(r["n_bodies"], r["t_hours"]): r for r in openmp_rows}
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    plotted_any = False
+
+    for t_hours in sorted({r["t_hours"] for r in rows}):
+        x = []
+        y = []
+        for n in sorted({r["n_bodies"] for r in rows}):
+            key = (n, t_hours)
+            if key in serial_map and key in openmp_map:
+                srow = serial_map[key]
+                orow = openmp_map[key]
+                x.append(n)
+                y.append(srow["execution_time_s"] / orow["execution_time_s"])
+        if x:
+            ax.plot(x, y, marker="o", linestyle="-", label=f"T={int(t_hours)}h")
+            plotted_any = True
+
+    if not plotted_any:
+        print("Нет данных для расчёта speedup")
+        return
+
+    ax.set_title("Speedup of OpenMP over Serial")
+    ax.set_xlabel("Number of bodies (N)")
+    ax.set_ylabel("Speedup ratio")
+    ax.set_xscale("log")
+    ax.grid(True, which="both", linestyle="--", alpha=0.4)
+    ax.legend(fontsize="small", loc="best")
+    fig.tight_layout()
+    filepath = PLOTS_DIR / filename
+    fig.savefig(filepath)
+    print(f"Saved plot {filepath}")
+    return fig
+
+
+def plot_efficiency(rows, filename):
+    serial_map = {(r["n_bodies"], r["t_hours"]): r for r in rows if r["method"] == "serial"}
+    fig, ax = plt.subplots(figsize=(9, 5))
+    plotted_any = False
+
+    for method in sorted(set(r["method"] for r in rows if r["method"] != "serial")):
+        for t_hours in sorted({r["t_hours"] for r in rows}):
+            x = []
+            y = []
+            for n in sorted({r["n_bodies"] for r in rows}):
+                key = (n, t_hours)
+                if key in serial_map:
+                    srow = serial_map[key]
+                    mrow = next((r for r in rows if r["method"] == method and r["n_bodies"] == n and r["t_hours"] == t_hours), None)
+                    if not mrow:
+                        continue
+                    resource_count = mrow.get("threads") or mrow.get("compute_units") or 1
+                    if resource_count <= 0:
+                        continue
+                    speedup = srow["execution_time_s"] / mrow["execution_time_s"]
+                    x.append(n)
+                    y.append(speedup / resource_count)
+            if x:
+                ax.plot(x, y, marker="o", linestyle="-", label=f"{method} T={int(t_hours)}h")
+                plotted_any = True
+
+    if not plotted_any:
+        print("Нет данных для расчёта эффективности")
+        return
+
+    ax.set_title("Parallel efficiency vs Number of bodies")
+    ax.set_xlabel("Number of bodies (N)")
+    ax.set_ylabel("Efficiency (speedup / resources)")
+    ax.set_xscale("log")
+    ax.grid(True, which="both", linestyle="--", alpha=0.4)
+    ax.legend(fontsize="small", loc="best")
+    fig.tight_layout()
+    filepath = PLOTS_DIR / filename
+    fig.savefig(filepath)
+    print(f"Saved plot {filepath}")
+    return fig
+
+
+def draw_plots(rows):
+    PLOTS_DIR.mkdir(parents=True, exist_ok=True)
+    plot_line(
+        rows,
+        x_key="n_bodies",
+        y_key="execution_time_s",
+        title="Execution time vs Number of bodies",
+        ylabel="Execution time, s",
+        filename="execution_time_vs_n.png",
+        logx=True,
+        logy=False,
+        group_by="method_t_hours",
+    )
+    plot_line(
+        rows,
+        x_key="n_bodies",
+        y_key="gflops",
+        title="Achieved performance vs Number of bodies",
+        ylabel="Performance, GFLOP/s",
+        filename="gflops_vs_n.png",
+        logx=True,
+        logy=False,
+        group_by="method_t_hours",
+    )
+    plot_line(
+        rows,
+        x_key="n_bodies",
+        y_key="energy_error",
+        title="Relative energy error vs Number of bodies",
+        ylabel="Energy error",
+        filename="energy_error_vs_n.png",
+        logx=True,
+        logy=True,
+        group_by="method_t_hours",
+    )
+    plot_speedup(rows, "speedup_openmp_vs_serial.png")
+    plot_efficiency(rows, "efficiency_vs_n.png")
+    plt.show()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Benchmark and plot N-body results")
+    parser.add_argument("--run", action="store_true", help="Run benchmark suite")
+    parser.add_argument("--plot", action="store_true", help="Plot results from CSV")
+    parser.add_argument("--force", action="store_true", help="Force re-run and overwrite CSV file")
+    args = parser.parse_args()
+
+    if not args.run and not args.plot:
+        args.run = True
+        args.plot = True
+
+    if args.run:
+        if CSV_PATH.exists() and args.force:
+            CSV_PATH.unlink()
+        if CSV_PATH.exists() and not args.force:
+            print(f"CSV already exists at {CSV_PATH}. Use --force to overwrite or delete manually.")
+        else:
+            benchmark_rows = []
+            for method in METHODS:
+                for n_bodies in NS:
+                    for t_hours in TIMES_HOURS:
+                        row = run_simulation(method, n_bodies, t_hours)
+                        if row is not None:
+                            benchmark_rows.append(row)
+            save_results(benchmark_rows)
+
+    if args.plot:
+        rows = load_results()
+        draw_plots(rows)
+
+
+if __name__ == "__main__":
+    main()
