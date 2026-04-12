@@ -66,8 +66,12 @@ all: setup $(NBODY_SERIAL_EXE) $(NBODY_OMP_EXE) $(TWOBODY_EXE)
 # All targets including SYCL
 all-sycl: all $(NBODY_SYCL_EXE)
 
+# Create obj directory
+obj:
+	mkdir -p obj
+
 # Setup build directories
-setup:
+setup: obj
 	@mkdir -p $(OBJ_DIR) $(BUILD_DIR)
 
 # ============================================================================
@@ -192,7 +196,7 @@ run-openmp: $(NBODY_OMP_EXE)
 	./$(NBODY_OMP_EXE)
 
 run-sycl: $(NBODY_SYCL_EXE)
-	./$(NBODY_SYCL_EXE)
+	@bash -c 'source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1 || true; ./$(NBODY_SYCL_EXE)'
 
 run-twobody: $(TWOBODY_EXE)
 	./$(TWOBODY_EXE)

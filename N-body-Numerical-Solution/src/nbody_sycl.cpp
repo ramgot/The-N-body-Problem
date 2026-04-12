@@ -32,7 +32,7 @@ private:
 
 public:
     NBodySimulationSYCL(const std::vector<Body>& initial_bodies, double dt_, double t_max_, double soft_)
-        : bodies(initial_bodies), num_bodies(initial_bodies.size()), dt(dt_), t_max(t_max_), softening(soft_),
+        : num_bodies(initial_bodies.size()), dt(dt_), t_max(t_max_), softening(soft_), bodies(initial_bodies),
           pos_x(sycl::range<1>(num_bodies)),
           pos_y(sycl::range<1>(num_bodies)),
           pos_z(sycl::range<1>(num_bodies)),
@@ -43,27 +43,8 @@ public:
           acc_y(sycl::range<1>(num_bodies)),
           acc_z(sycl::range<1>(num_bodies)),
           mass(sycl::range<1>(num_bodies)),
-          q(sycl::gpu_selector_v),
-          compute_units(q.get_device().get_info<sycl::info::device::max_compute_units>())
-          pos_y(sycl::range<1>(num_bodies)),
-          pos_z(sycl::range<1>(num_bodies)),
-          vel_x(sycl::range<1>(num_bodies)),
-          vel_y(sycl::range<1>(num_bodies)),
-          vel_z(sycl::range<1>(num_bodies)),
-          acc_x(sycl::range<1>(num_bodies)),
-          acc_y(sycl::range<1>(num_bodies)),
-          acc_z(sycl::range<1>(num_bodies)),
-          mass(sycl::range<1>(num_bodies)),
-          q(sycl::gpu_selector_v)
-    {
-        std::cout << "Initializing SYCL simulation with " << num_bodies << " bodies..." << std::endl;
-        if (!q.get_device().has(sycl::aspect::fp64)) {
-            throw std::runtime_error(
-                "Selected SYCL device does not support double precision (fp64). "
-                "Use a different device or switch the simulation to float.");
-        }
-
-        // Copy initial data to buffers
+          q(sycl::default_selector_v),
+          compute_units(q.get_device().get_info<sycl::info::device::max_compute_units>()) {
         auto posx = pos_x.get_host_access(sycl::write_only);
         auto posy = pos_y.get_host_access(sycl::write_only);
         auto posz = pos_z.get_host_access(sycl::write_only);
@@ -76,17 +57,13 @@ public:
             posx[i] = bodies[i].position.x;
             posy[i] = bodies[i].position.y;
             posz[i] = bodies[i].position.z;
-
             velx[i] = bodies[i].velocity.x;
             vely[i] = bodies[i].velocity.y;
             velz[i] = bodies[i].velocity.z;
-
             m[i] = bodies[i].mass;
         }
-
         std::cout << "Initialization complete." << std::endl;
     }
-
     void computeAccelerations() {
         const size_t TILE = 128;
         size_t N = num_bodies;
@@ -236,8 +213,30 @@ public:
     PerformanceMetrics run() {
         PerformanceMetrics metrics;
         size_t steps = static_cast<size_t>(t_max / dt);
-        std::cout << "Starting simulation on device: " 
-                  << q.get_device().get_info<sycl::info::device::name>() << std::endl;
+        
+        // Get device info
+        auto device = q.get_device();
+        auto device_name = device.get_info<sycl::info::device::name>();
+        auto device_type = device.get_info<sycl::info::device::device_type>();
+        
+        // Determine if GPU or CPU
+        std::string device_type_str;
+        if (device_type == sycl::info::device_type::gpu) {
+            device_type_str = "🎮 GPU";
+        } else if (device_type == sycl::info::device_type::cpu) {
+            device_type_str = "💻 CPU";
+        } else if (device_type == sycl::info::device_type::accelerator) {
+            device_type_str = "⚡ ACCELERATOR";
+        } else {
+            device_type_str = "❓ UNKNOWN";
+        }
+        
+        std::cout << "════════════════════════════════════════" << std::endl;
+        std::cout << "Starting simulation on device:" << std::endl;
+        std::cout << "  Device Type: " << device_type_str << std::endl;
+        std::cout << "  Device Name: " << device_name << std::endl;
+        std::cout << "  Compute Units: " << compute_units << std::endl;
+        std::cout << "════════════════════════════════════════" << std::endl;
         std::cout << "Total steps: " << steps << std::endl;
 
         SystemState initial_state(bodies, 0.0);

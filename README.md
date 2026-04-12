@@ -70,6 +70,51 @@
 pip install matplotlib numpy
 ```
 
+## ⚙️ Установка Intel oneAPI (для SYCL/GPU)
+
+### Linux (Ubuntu/Debian)
+
+```bash
+# 1. Обновление системы
+sudo apt-get update
+sudo apt-get install -y wget gpg
+
+# 2. Добавление GPG ключа Intel
+wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | \
+  gpg --dearmor | \
+  sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null
+
+# 3. Добавление репозитория Intel oneAPI
+echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | \
+  sudo tee /etc/apt/sources.list.d/oneAPI.list
+
+# 4. Обновление списка пакетов
+sudo apt-get update
+
+# 5. Установка Intel oneAPI Base Kit
+sudo apt-get install -y intel-basekit
+
+# Альтернатива: установка только компилятора HPC Kit (меньше и быстрее)
+# sudo apt-get install -y intel-hpckit
+```
+
+### Активация oneAPI в текущей сессии
+```bash
+source /opt/intel/oneapi/setvars.sh
+```
+
+### Автоматическая активация при каждом запуске
+Добавьте в `~/.bashrc`:
+```bash
+echo 'source /opt/intel/oneapi/setvars.sh > /dev/null 2>&1' >> ~/.bashrc
+source ~/.bashrc
+```
+
+Или добавьте строку напрямую:
+```bash
+source /opt/intel/oneapi/setvars.sh > /dev/null 2>&1
+```
+
 ## 🚀 Быстрый старт
 
 ### 1. Клонирование и сборка
@@ -81,14 +126,25 @@ make all-sycl     # Собрать включая SYCL (требует Intel one
 ```
 
 ### 2. Запуск тестов
+
+#### С GPU (рекомендуется - автоматически активирует oneAPI):
 ```bash
-make run          # Запустить все версии с тестовыми параметрами
+make run-sycl     # GPU через Makefile
+# или
+./nbody_gpu.sh 1000 3600 86400  # Wrapper скрипт (не требует ручной активации)
+```
+
+#### На CPU:
+```bash
+make run-serial   # Последовательная версия
+make run-openmp   # OpenMP версия
 ```
 
 ### 3. Запуск бенчмарков
 ```bash
 make benchmark-full     # Полный цикл через Makefile
 ./run_benchmarks.sh     # Интерактивный скрипт с проверками
+./test_gpu.sh 100       # Сравнение GPU vs CPU vs OpenMP
 ```
 
 ## 📊 Бенчмаркинг
@@ -155,10 +211,183 @@ python3 benchmark.py --force
 # Пример: ./nbody_openmp 1000 3600 86400 8 random
 ```
 
-#### SYCL версия
+#### SYCL версия (GPU)
 ```bash
+# Способ 1: Wrapper скрипт (рекомендуется - не требует ручной активации oneAPI)
+./nbody_gpu.sh N DT T_MAX [SCENARIO]
+# Пример: ./nbody_gpu.sh 1000 3600 86400 solar-system
+
+# Способ 2: Через Makefile (также автоматически активирует oneAPI)
+make run-sycl
+
+# Способ 3: Прямой запуск (требует ручной активации oneAPI)
 ./nbody_sycl N DT T_MAX [SCENARIO]
 # Пример: ./nbody_sycl 1000 3600 86400 solar-system
+```
+
+## 🎮 Запуск на GPU (Accelerators)
+
+### ✅ Запуск SYCL версии на GPU
+
+SYCL версия автоматически выбирает доступное GPU устройство.
+
+**✅ Протестировано на:** AMD Radeon 780M (iGPU) - работает успешно!
+
+#### Способ 1: Wrapper скрипт (рекомендуется - самый простой)
+```bash
+./nbody_gpu.sh 1000 3600 86400
+```
+
+#### Способ 2: Через Makefile (также автоматически активирует oneAPI)
+```bash
+make run-sycl
+```
+
+#### Способ 3: Ручной запуск с активацией oneAPI
+```bash
+source /opt/intel/oneapi/setvars.sh
+./nbody_sycl 1000 3600 86400
+```
+
+### AMD GPU (CDNA/RDNA, Radeon)
+
+#### ✅ Для встроенной видеокарты (iGPU) в AMD Ryzen процессорах
+
+Интегрированная видеокарта автоматически поддерживается через Level Zero в Intel oneAPI. Просто запустите:
+
+```bash
+source /opt/intel/oneapi/setvars.sh
+./nbody_sycl N DT T_MAX [SCENARIO]
+```
+
+**Пример для Radeon 780M:**
+```bash
+source /opt/intel/oneapi/setvars.sh
+./nbody_sycl 1000 3600 86400        # Симуляция 1000 тел на 1 день
+./nbody_sycl 100 3600 21600         # Быстрая симуляция 100 тел на 6 часов
+```
+
+#### Для дискретных AMD GPU (Radeon Pro, Instinct)
+
+Требуется установка дополнительного софта:
+
+```bash
+# Установка ROCm
+wget -q -O - https://repo.radeon.com/rocm/rocm.gpg.key | sudo apt-key add -
+echo 'deb [arch=amd64] https://repo.radeon.com/rocm/apt/ubuntu $(lsb_release -sc) main' | \
+  sudo tee /etc/apt/sources.list.d/rocm.list
+sudo apt-get update
+sudo apt-get install -y rocm-dkms
+
+# Активировать oneAPI с HIP поддержкой
+source /opt/intel/oneapi/setvars.sh
+export ONEAPI_DEVICE_SELECTOR=hip
+
+# Сборка и запуск
+make clean
+make run-sycl
+```
+
+### Intel GPU (Arc)
+
+#### Собрать и запустить для Intel Arc GPU
+```bash
+# Активировать oneAPI
+source /opt/intel/oneapi/setvars.sh
+export ONEAPI_DEVICE_SELECTOR=level_zero
+
+# Сборка и запуск
+make run-sycl
+```
+
+### Nvidia GPU (CUDA) - Инструкция для других компьютеров
+
+#### Требования
+- **Nvidia GPU** (CUDA Compute Capability 5.0+)
+- **Intel oneAPI** с CUDA поддержкой
+- **CUDA Toolkit 11.8+** (некоторые версии)
+
+#### Установка необходимых компонентов
+
+```bash
+# 1. Уже установлено: Intel oneAPI Base Kit
+# (если нет, см. раздел выше: "Установка Intel oneAPI")
+
+# 2. Убедитесь, что CUDA поддержка доступна в oneAPI
+# Проверьте установленные компоненты:
+ls /opt/intel/oneapi/ | grep -i dpc
+
+# 3. Если нужна явная поддержка CUDA, установите NVIDIA CUDA Toolkit:
+# (Приблизительная инструкция, версии могут отличаться)
+wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-repo-ubuntu2204_12.4.1-1_amd64.deb
+sudo dpkg -i cuda-repo-ubuntu2204_12.4.1-1_amd64.deb
+sudo apt-get update
+sudo apt-get install -y cuda-toolkit
+```
+
+#### Собрать и запустить для Nvidia GPU
+```bash
+# Активировать oneAPI с CUDA поддержкой
+source /opt/intel/oneapi/setvars.sh
+export ONEAPI_DEVICE_SELECTOR=cuda
+
+# Пересборка SYCL версии (если нужна)
+make clean
+icpx -std=c++17 -Wall -Wextra -O2 -fsycl \
+  -IN-body-Numerical-Solution/include -ICommon/include \
+  N-body-Numerical-Solution/src/nbody_sycl.cpp \
+  Common/src/body.cpp Common/src/Vector3.cpp \
+  -o nbody_sycl
+
+# Запуск
+./nbody_sycl 1000 3600 86400
+```
+
+#### Проверка доступности CUDA в системе
+```bash
+which nvcc          # Проверить NVIDIA компилятор
+nvidia-smi          # Информация о GPU
+```
+
+### CPU (если GPU недоступен)
+
+```bash
+# Использовать CPU как fallback
+source /opt/intel/oneapi/setvars.sh
+./nbody_sycl 1000 3600 86400
+
+# Или явно выбрать CPU
+ONEAPI_DEVICE_SELECTOR=cpu ./nbody_sycl 1000 3600 86400
+```
+
+### Проверка доступных SYCL устройств
+
+```bash
+# Способ 1: Посмотреть сообщение о выборе устройства
+source /opt/intel/oneapi/setvars.sh
+./nbody_sycl 100 3600 21600 2>&1 | grep "Starting simulation on device"
+
+# Способ 2: Попробовать разные селекторы
+export ONEAPI_DEVICE_SELECTOR=cpu
+./nbody_sycl 100 3600 21600 2>&1 | grep "device"
+
+export ONEAPI_DEVICE_SELECTOR=gpu
+./nbody_sycl 100 3600 21600 2>&1 | grep "device"
+```
+
+### Быстрое сравнение производительности CPU vs GPU
+
+```bash
+source /opt/intel/oneapi/setvars.sh
+
+echo "=== Запуск на CPU ==="
+ONEAPI_DEVICE_SELECTOR=cpu time ./nbody_sycl 1000 3600 21600
+
+echo -e "\n=== Запуск на GPU (автоматический выбор) ==="
+time ./nbody_sycl 1000 3600 21600
+
+echo -e "\n=== OpenMP версия для сравнения ==="
+time ./nbody_openmp 1000 3600 21600 8
 ```
 
 ### Параметры командной строки
