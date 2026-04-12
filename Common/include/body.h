@@ -13,7 +13,8 @@ struct Body {
     // Constructors
     Body();
     Body(const Vector3& pos, const Vector3& vel, double m);
-    Body(const Body& other);
+    Body(const Body& other) = default;
+    Body& operator=(const Body& other) = default;
 
     // Methods
     void resetAcceleration();

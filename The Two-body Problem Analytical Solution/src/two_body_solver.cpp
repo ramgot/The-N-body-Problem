@@ -73,8 +73,6 @@ OrbitalElements TwoBodySolver::cartesianToElements(const Vector3& r, const Vecto
     double cos_nu = e_vec.dot(r) / (e_mag * r_mag);
     double sin_nu = h_vec.dot(e_vec.cross(r)) / (h_mag * e_mag * r_mag);
     cos_nu = std::max(-1.0, std::min(1.0, cos_nu));
-    double nu = std::atan2(sin_nu, cos_nu);
-
     double cos_E = (elem.e + cos_nu) / (1.0 + elem.e * cos_nu);
     double sin_E = safe_sqrt(1.0 - elem.e * elem.e) * sin_nu / (1.0 + elem.e * cos_nu);
     cos_E = std::max(-1.0, std::min(1.0, cos_E));

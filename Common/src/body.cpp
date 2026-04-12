@@ -1,5 +1,6 @@
 #include "../include/body.h"
 #include "../include/common.h"
+#include <cstdlib>
 #include <cmath>
 #include <random>
 #include <stdexcept>
@@ -14,10 +15,6 @@ Body::Body(const Vector3& pos, const Vector3& vel, double m)
     : position(pos), velocity(vel), mass(m) {
     acceleration.zero();
 }
-
-Body::Body(const Body& other)
-    : position(other.position), velocity(other.velocity),
-    acceleration(other.acceleration), mass(other.mass) {}
 
 void Body::resetAcceleration() {
     acceleration.zero();
@@ -106,7 +103,7 @@ double SystemState::angularMomentumError(const SystemState& initial) const {
 // Initial condition generators
 namespace InitialConditions {
 
-    std::vector<Body> twoBodyCircular(double m1, double m2, double distance, double t0) {
+    std::vector<Body> twoBodyCircular(double m1, double m2, double distance, double /*t0*/) {
         std::vector<Body> bodies(2);
 
         double mu = G * (m1 + m2);
@@ -121,7 +118,7 @@ namespace InitialConditions {
         return bodies;
     }
 
-    std::vector<Body> twoBodyElliptical(double m1, double m2, double a, double e, double t0) {
+    std::vector<Body> twoBodyElliptical(double m1, double m2, double a, double e, double /*t0*/) {
         std::vector<Body> bodies(2);
 
         double r_peri = a * (1 - e);
@@ -140,9 +137,9 @@ namespace InitialConditions {
         // Simple uniform sphere for demonstration
         // For actual Plummer model, more sophisticated generation needed
         for (size_t i = 0; i < N; ++i) {
-            double r = scale_radius * std::pow(rand() / (double)RAND_MAX, 1.0 / 3.0);
-            double theta = 2.0 * M_PI * (rand() / (double)RAND_MAX);
-            double phi = std::acos(2.0 * (rand() / (double)RAND_MAX) - 1.0);
+            double r = scale_radius * std::pow(std::rand() / (double)RAND_MAX, 1.0 / 3.0);
+            double theta = 2.0 * M_PI * (std::rand() / (double)RAND_MAX);
+            double phi = std::acos(2.0 * (std::rand() / (double)RAND_MAX) - 1.0);
 
             Vector3 pos(
                 r * std::sin(phi) * std::cos(theta),
@@ -152,8 +149,8 @@ namespace InitialConditions {
 
             // Velocity from virial theorem approximation
             double v = std::sqrt(G * total_mass / r) * 0.5;
-            double v_theta = 2.0 * M_PI * (rand() / (double)RAND_MAX);
-            double v_phi = std::acos(2.0 * (rand() / (double)RAND_MAX) - 1.0);
+            double v_theta = 2.0 * M_PI * (std::rand() / (double)RAND_MAX);
+            double v_phi = std::acos(2.0 * (std::rand() / (double)RAND_MAX) - 1.0);
 
             Vector3 vel(
                 v * std::sin(v_phi) * std::cos(v_theta),
@@ -193,15 +190,15 @@ namespace InitialConditions {
     std::vector<Body> solarSystem() {
         struct PlanetInfo { const char* name; double a_au; double mass; };
         const PlanetInfo planets[] = {
-            {\"Mercury\", 0.387, 3.3011e23},
-            {\"Venus\",   0.723, 4.8675e24},
-            {\"Earth\",   1.000, 5.9724e24},
-            {\"Mars\",    1.524, 6.4171e23},
-            {\"Jupiter\", 5.204, 1.8982e27},
-            {\"Saturn\",  9.582, 5.6834e26},
-            {\"Uranus\", 19.201, 8.6810e25},
-            {\"Neptune\",30.047, 1.02413e26},
-            {\"Pluto\",  39.48,  1.303e22},
+            {"Mercury", 0.387, 3.3011e23},
+            {"Venus",   0.723, 4.8675e24},
+            {"Earth",   1.000, 5.9724e24},
+            {"Mars",    1.524, 6.4171e23},
+            {"Jupiter", 5.204, 1.8982e27},
+            {"Saturn",  9.582, 5.6834e26},
+            {"Uranus", 19.201, 8.6810e25},
+            {"Neptune", 30.047, 1.02413e26},
+            {"Pluto",   39.48, 1.303e22},
         };
 
         std::vector<Body> bodies;

@@ -1,4 +1,5 @@
 #include "../include/vector3.h"
+#include <algorithm>
 #include <cmath>
 #include <iomanip>
 #include <stdexcept>
@@ -13,6 +14,10 @@ Vector3 Vector3::operator+(const Vector3& other) const {
 
 Vector3 Vector3::operator-(const Vector3& other) const {
     return Vector3(x - other.x, y - other.y, z - other.z);
+}
+
+Vector3 Vector3::operator-() const {
+    return Vector3(-x, -y, -z);
 }
 
 Vector3 Vector3::operator*(double scalar) const {
