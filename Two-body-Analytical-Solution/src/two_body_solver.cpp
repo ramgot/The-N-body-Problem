@@ -4,6 +4,16 @@
 #include <algorithm>
 #include <string>
 
+namespace {
+double normalize_angle(double angle) {
+    angle = std::fmod(angle, 2.0 * M_PI);
+    if (angle < 0.0) {
+        angle += 2.0 * M_PI;
+    }
+    return angle;
+}
+}
+
 TwoBodySolver::TwoBodySolver(double mass1, double mass2)
     : m1(mass1), m2(mass2), mu(G* (mass1 + mass2)) {
 
@@ -44,7 +54,6 @@ OrbitalElements TwoBodySolver::cartesianToElements(const Vector3& r, const Vecto
 
     OrbitalElements elem;
     elem.a = -mu / (2.0 * energy_per_mass);
-    elem.e = std::sqrt(1.0 + 2.0 * energy_per_mass * h_mag * h_mag / (mu * mu));
     elem.i = safe_acos(h_vec.z / h_mag);
 
     Vector3 n_vec(-h_vec.y, h_vec.x, 0.0);
@@ -59,6 +68,7 @@ OrbitalElements TwoBodySolver::cartesianToElements(const Vector3& r, const Vecto
 
     Vector3 e_vec = (v.cross(h_vec) * (1.0 / mu)) - (r * (1.0 / r_mag));
     double e_mag = e_vec.norm();
+    elem.e = e_mag;
 
     if (n_mag > 1e-15 && e_mag > 1e-15) {
         double cos_omega = n_vec.dot(e_vec) / (n_mag * e_mag);
@@ -66,14 +76,30 @@ OrbitalElements TwoBodySolver::cartesianToElements(const Vector3& r, const Vecto
         elem.omega = safe_acos(cos_omega);
         if (e_vec.z < 0) elem.omega = 2.0 * M_PI - elem.omega;
     }
+    else if (e_mag > 1e-15) {
+        elem.omega = normalize_angle(std::atan2(e_vec.y, e_vec.x));
+    }
     else {
         elem.omega = 0.0;
     }
 
-    double cos_nu = e_vec.dot(r) / (e_mag * r_mag);
-    double sin_nu = h_vec.dot(e_vec.cross(r)) / (h_mag * e_mag * r_mag);
-    cos_nu = std::max(-1.0, std::min(1.0, cos_nu));
-    double nu = std::atan2(sin_nu, cos_nu);
+    double cos_nu = 1.0;
+    double sin_nu = 0.0;
+    if (e_mag > 1e-15) {
+        cos_nu = e_vec.dot(r) / (e_mag * r_mag);
+        sin_nu = h_vec.dot(e_vec.cross(r)) / (h_mag * e_mag * r_mag);
+        cos_nu = std::max(-1.0, std::min(1.0, cos_nu));
+    }
+    else if (n_mag > 1e-15) {
+        cos_nu = n_vec.dot(r) / (n_mag * r_mag);
+        sin_nu = h_vec.dot(n_vec.cross(r)) / (h_mag * n_mag * r_mag);
+        cos_nu = std::max(-1.0, std::min(1.0, cos_nu));
+    }
+    else {
+        double planar_angle = std::atan2(r.y, r.x);
+        cos_nu = std::cos(planar_angle);
+        sin_nu = std::sin(planar_angle);
+    }
 
     double cos_E = (elem.e + cos_nu) / (1.0 + elem.e * cos_nu);
     double sin_E = safe_sqrt(1.0 - elem.e * elem.e) * sin_nu / (1.0 + elem.e * cos_nu);

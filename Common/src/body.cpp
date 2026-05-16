@@ -25,8 +25,8 @@ void Body::resetAcceleration() {
 
 // Update methods for Verlet integration
 void Body::updatePosition(double dt) {
-    // r(t+dt) = r(t) + v(t)*dt + 0.5*a(t)*dt^2
-    position += velocity * dt + acceleration * (0.5 * dt * dt);
+    // Drift step for kick-drift-kick Velocity Verlet.
+    position += velocity * dt;
 }
 
 void Body::updateVelocityHalf(double dt) {
@@ -90,7 +90,17 @@ void SystemState::computeConservedQuantities() {
 }
 
 double SystemState::energyError(const SystemState& initial) const {
-    return std::abs((total_energy - initial.total_energy) / initial.total_energy);
+    double delta = total_energy - initial.total_energy;
+    if (!std::isfinite(delta) || !std::isfinite(initial.total_energy)) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    double scale = std::abs(initial.total_energy);
+    if (scale <= std::numeric_limits<double>::min()) {
+        return std::abs(delta);
+    }
+
+    return std::abs(delta) / scale;
 }
 
 double SystemState::momentumError(const SystemState& initial) const {
@@ -107,6 +117,7 @@ double SystemState::angularMomentumError(const SystemState& initial) const {
 namespace InitialConditions {
 
     std::vector<Body> twoBodyCircular(double m1, double m2, double distance, double t0) {
+        (void)t0;
         std::vector<Body> bodies(2);
 
         double mu = G * (m1 + m2);
@@ -122,6 +133,7 @@ namespace InitialConditions {
     }
 
     std::vector<Body> twoBodyElliptical(double m1, double m2, double a, double e, double t0) {
+        (void)t0;
         std::vector<Body> bodies(2);
 
         double r_peri = a * (1 - e);

@@ -10,6 +10,7 @@ public:
     // Constructors
     Vector3(double x_ = 0.0, double y_ = 0.0, double z_ = 0.0);
     Vector3(const Vector3& other) = default;
+    Vector3& operator=(const Vector3& other) = default;
 
     // Basic operations
     Vector3 operator+(const Vector3& other) const;

@@ -92,13 +92,11 @@ public:
                 [=](sycl::nd_item<1> item){
 
                 size_t i = item.get_global_id(0);
-                if (i >= N) {
-                    return;
-                }
+                bool active = i < N;
 
-                double xi = px[i];
-                double yi = py[i];
-                double zi = pz[i];
+                double xi = active ? px[i] : 0.0;
+                double yi = active ? py[i] : 0.0;
+                double zi = active ? pz[i] : 0.0;
 
                 double aix = 0;
                 double aiy = 0;
@@ -113,45 +111,51 @@ public:
                         tile_y[item.get_local_id(0)] = py[j];
                         tile_z[item.get_local_id(0)] = pz[j];
                         tile_m[item.get_local_id(0)] = m[j];
+                    } else {
+                        tile_x[item.get_local_id(0)] = 0.0;
+                        tile_y[item.get_local_id(0)] = 0.0;
+                        tile_z[item.get_local_id(0)] = 0.0;
+                        tile_m[item.get_local_id(0)] = 0.0;
                     }
 
                     item.barrier();
 
-                    for(size_t k = 0; k < TILE && tile+k < N; k++){
-                        double dx = tile_x[k] - xi;
-                        double dy = tile_y[k] - yi;
-                        double dz = tile_z[k] - zi;
+                    if (active) {
+                        for(size_t k = 0; k < TILE && tile+k < N; k++){
+                            double dx = tile_x[k] - xi;
+                            double dy = tile_y[k] - yi;
+                            double dz = tile_z[k] - zi;
 
-                        double dist2 = dx*dx + dy*dy + dz*dz + soft*soft;
-                        double inv = sycl::rsqrt(dist2);
-                        double inv3 = inv*inv*inv;
+                            double dist2 = dx*dx + dy*dy + dz*dz + soft*soft;
+                            double inv = sycl::rsqrt(dist2);
+                            double inv3 = inv*inv*inv;
 
-                        double f = G_val * tile_m[k] * inv3;
+                            double f = G_val * tile_m[k] * inv3;
 
-                        aix += dx*f;
-                        aiy += dy*f;
-                        aiz += dz*f;
+                            aix += dx*f;
+                            aiy += dy*f;
+                            aiz += dz*f;
+                        }
                     }
 
                     item.barrier();
                 }
 
-                ax[i] = aix;
-                ay[i] = aiy;
-                az[i] = aiz;
+                if (active) {
+                    ax[i] = aix;
+                    ay[i] = aiy;
+                    az[i] = aiz;
+                }
             });
         });
     }
 
     void integrationStep() {
-        std::cout << "> Start integrationStep..." << std::endl;
         size_t N = num_bodies;
         double dt_local = dt;
 
         // First half of velocity update
-        std::cout << ">> First half of velocity update..." << std::endl;
         q.submit([&](sycl::handler& h){
-            std::cout << ">>> In submit..." << std::endl;
             auto vx = vel_x.get_access<sycl::access::mode::read_write>(h);
             auto vy = vel_y.get_access<sycl::access::mode::read_write>(h);
             auto vz = vel_z.get_access<sycl::access::mode::read_write>(h);
@@ -159,17 +163,14 @@ public:
             auto ay = acc_y.get_access<sycl::access::mode::read>(h);
             auto az = acc_z.get_access<sycl::access::mode::read>(h);
 
-            std::cout << ">>> parallel_for..." << std::endl;
             h.parallel_for(N, [=](auto i){
                 vx[i] += 0.5*dt_local*ax[i];
                 vy[i] += 0.5*dt_local*ay[i];
                 vz[i] += 0.5*dt_local*az[i];
             });
-            std::cout << ">>> Out submit..." << std::endl;
         });
 
         // Update positions
-        std::cout << ">> Update positions..." << std::endl;
         q.submit([&](sycl::handler& h){
             auto vx = vel_x.get_access<sycl::access::mode::read>(h);
             auto vy = vel_y.get_access<sycl::access::mode::read>(h);
@@ -185,11 +186,9 @@ public:
             });
         });
 
-        std::cout << ">> computeAccelerations..." << std::endl;
         computeAccelerations();
 
         // Second half of velocity update
-        std::cout << ">> Second half of velocity update..." << std::endl;
         q.submit([&](sycl::handler& h){
             auto vx = vel_x.get_access<sycl::access::mode::read_write>(h);
             auto vy = vel_y.get_access<sycl::access::mode::read_write>(h);
@@ -205,9 +204,7 @@ public:
             });
         });
 
-        std::cout << ">> Wait..." << std::endl;
-        q.wait(); // ждать завершения всех kernel
-        std::cout << "> End integrationStep..." << std::endl;
+        q.wait_and_throw();
     }
 
     PerformanceMetrics run() {
@@ -222,21 +219,19 @@ public:
         // Determine if GPU or CPU
         std::string device_type_str;
         if (device_type == sycl::info::device_type::gpu) {
-            device_type_str = "🎮 GPU";
+            device_type_str = "GPU";
         } else if (device_type == sycl::info::device_type::cpu) {
-            device_type_str = "💻 CPU";
+            device_type_str = "CPU";
         } else if (device_type == sycl::info::device_type::accelerator) {
-            device_type_str = "⚡ ACCELERATOR";
+            device_type_str = "ACCELERATOR";
         } else {
-            device_type_str = "❓ UNKNOWN";
+            device_type_str = "UNKNOWN";
         }
         
-        std::cout << "════════════════════════════════════════" << std::endl;
         std::cout << "Starting simulation on device:" << std::endl;
         std::cout << "  Device Type: " << device_type_str << std::endl;
         std::cout << "  Device Name: " << device_name << std::endl;
         std::cout << "  Compute Units: " << compute_units << std::endl;
-        std::cout << "════════════════════════════════════════" << std::endl;
         std::cout << "Total steps: " << steps << std::endl;
 
         SystemState initial_state(bodies, 0.0);
@@ -247,7 +242,6 @@ public:
         computeAccelerations();
         q.wait_and_throw();
 
-        std::cout << "Start loop..." << std::endl;
         for(size_t step = 0; step < steps; ++step){
             integrationStep();
 
