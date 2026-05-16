@@ -10,8 +10,10 @@ Usage:
 import argparse
 import csv
 import datetime
+import math
 import os
 import re
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -22,6 +24,9 @@ FIXED_DT = 3600.0  # seconds (1 hour)
 NS = [3, 10, 100, 1000]
 # Total simulation times in hours. Эта сетка задаёт размер эксперимента по времени.
 TIMES_HOURS = [24, 168, 720, 8760]  # 1 day, 7 days, 30 days, 365 days
+SKIPPED_BENCHMARKS = {
+    ("serial", 1000, 8760): "serial N=1000 T=8760h is too slow for routine benchmark runs",
+}
 
 METHODS = {
     "serial": "nbody_serial",
@@ -57,16 +62,19 @@ CSV_HEADERS = [
 RESULTS_DIR = Path("benchmark_results")
 PLOTS_DIR = RESULTS_DIR / "plots"
 CSV_PATH = RESULTS_DIR / "benchmark_results.csv"
+DEFAULT_ONEAPI_SETVARS = Path("/opt/intel/oneapi/setvars.sh")
+_ONEAPI_ENV_CACHE = None
+FLOAT_PATTERN = r"[-+]?(?:nan|inf|(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
 
 OUTPUT_PATTERNS = {
-    "execution_time_s": re.compile(r"Execution time:\s*([0-9.eE+-]+)\s*seconds"),
-    "gflops": re.compile(r"Performance:\s*([0-9.eE+-]+)\s*GFLOP/s"),
-    "energy_error": re.compile(r"Energy error:\s*([0-9.eE+-]+)"),
+    "execution_time_s": re.compile(rf"Execution time:\s*({FLOAT_PATTERN})\s*seconds", re.IGNORECASE),
+    "gflops": re.compile(rf"Performance:\s*({FLOAT_PATTERN})\s*GFLOP/s", re.IGNORECASE),
+    "energy_error": re.compile(rf"Energy error:\s*({FLOAT_PATTERN})", re.IGNORECASE),
     "steps_completed": re.compile(r"Steps completed:\s*(\d+)"),
 }
 OPTIONAL_PATTERNS = {
-    "threads": re.compile(r"Threads:\s*(\d+)"),
-    "compute_units": re.compile(r"Compute units:\s*(\d+)"),
+    "threads": re.compile(r"(?:Number\s+of\s+threads|Threads):\s*(\d+)", re.IGNORECASE),
+    "compute_units": re.compile(r"Compute\s+Units:\s*(\d+)", re.IGNORECASE),
 }
 
 
@@ -91,6 +99,40 @@ def find_executable(exe_name: str) -> Path | None:
     return None
 
 
+def load_oneapi_env():
+    """Return an environment with Intel oneAPI variables loaded."""
+    global _ONEAPI_ENV_CACHE
+    if _ONEAPI_ENV_CACHE is not None:
+        return _ONEAPI_ENV_CACHE
+
+    env = os.environ.copy()
+    setvars_path = Path(os.environ.get("ONEAPI_SETVARS", DEFAULT_ONEAPI_SETVARS))
+    if not setvars_path.exists():
+        print(f"Warning: oneAPI setvars not found at {setvars_path}; running SYCL with current environment.")
+        _ONEAPI_ENV_CACHE = env
+        return _ONEAPI_ENV_CACHE
+
+    command = f"source {shlex.quote(str(setvars_path))} >/dev/null 2>&1 && env -0"
+    process = subprocess.run(
+        ["bash", "-c", command],
+        capture_output=True,
+        env=env,
+    )
+    if process.returncode != 0:
+        print(f"Warning: failed to source {setvars_path}; running SYCL with current environment.")
+        _ONEAPI_ENV_CACHE = env
+        return _ONEAPI_ENV_CACHE
+
+    for item in process.stdout.split(b"\0"):
+        if not item or b"=" not in item:
+            continue
+        key, value = item.split(b"=", 1)
+        env[key.decode("utf-8", "surrogateescape")] = value.decode("utf-8", "surrogateescape")
+
+    _ONEAPI_ENV_CACHE = env
+    return _ONEAPI_ENV_CACHE
+
+
 def parse_metrics(output: str):
     data = {}
     for key, pattern in OUTPUT_PATTERNS.items():
@@ -108,6 +150,11 @@ def parse_metrics(output: str):
 
 
 def run_simulation(method: str, n_bodies: int, t_hours: float):
+    skip_reason = SKIPPED_BENCHMARKS.get((method, n_bodies, int(t_hours)))
+    if skip_reason:
+        print(f"Skipping {method} | N={n_bodies} | T={t_hours}h: {skip_reason}")
+        return None
+
     exe_name = METHODS[method]
     exe_path = find_executable(exe_name)
     if exe_path is None:
@@ -117,15 +164,17 @@ def run_simulation(method: str, n_bodies: int, t_hours: float):
     t_max_s = t_hours * 3600.0
     scenario = SCENARIO_BY_N.get(n_bodies, "random")
     command = [str(exe_path), str(n_bodies), str(FIXED_DT), str(t_max_s)]
+    requested_threads = 0
 
     if method == "openmp":
-        threads = os.cpu_count() or 1
-        command.append(str(threads))
+        requested_threads = os.cpu_count() or 1
+        command.append(str(requested_threads))
 
     command.append(scenario)
 
     print(f"Running {method} | N={n_bodies} | T={t_hours}h | cmd={command}")
-    process = subprocess.run(command, capture_output=True, text=True)
+    env = load_oneapi_env() if method == "sycl" else None
+    process = subprocess.run(command, capture_output=True, text=True, env=env)
     if process.returncode != 0:
         raise RuntimeError(
             f"Benchmark failed for {exe_name} N={n_bodies} T={t_hours}h\n"
@@ -134,6 +183,12 @@ def run_simulation(method: str, n_bodies: int, t_hours: float):
         )
 
     metrics = parse_metrics(process.stdout)
+    reported_threads = metrics.get("threads", 0)
+    if method == "serial":
+        reported_threads = 1
+    elif method == "openmp" and reported_threads == 0:
+        reported_threads = requested_threads
+
     metrics.update({
         "timestamp": datetime.datetime.now().isoformat(),
         "method": method,
@@ -143,7 +198,7 @@ def run_simulation(method: str, n_bodies: int, t_hours: float):
         "t_hours": t_hours,
         "dt_s": FIXED_DT,
         "t_max_s": t_max_s,
-        "threads": metrics.get("threads", 0),
+        "threads": reported_threads,
         "compute_units": metrics.get("compute_units", 0),
         "command": " ".join(command),
     })
@@ -193,12 +248,32 @@ def plot_line(rows, x_key, y_key, title, ylabel, filename, logx=False, logy=Fals
         groups.setdefault(label, []).append(row)
 
     fig, ax = plt.subplots(figsize=(8, 5))
+    plotted_any = False
 
     for label, group_rows in sorted(groups.items()):
         sorted_rows = sorted(group_rows, key=lambda x: (x["n_bodies"], x["t_hours"]))
-        xs = [r[x_key] for r in sorted_rows]
-        ys = [r[y_key] for r in sorted_rows]
+        xs = []
+        ys = []
+        for row in sorted_rows:
+            x = row[x_key]
+            y = row[y_key]
+            if not math.isfinite(x) or not math.isfinite(y):
+                continue
+            if logx and x <= 0:
+                continue
+            if logy and y <= 0:
+                continue
+            xs.append(x)
+            ys.append(y)
+        if not xs:
+            continue
         ax.plot(xs, ys, marker="o", label=label)
+        plotted_any = True
+
+    if not plotted_any:
+        plt.close(fig)
+        print(f"Skipping plot {filename}: no finite positive data for requested scale")
+        return None
 
     ax.set_title(title)
     ax.set_xlabel("Number of bodies (N)" if x_key == "n_bodies" else x_key)
@@ -233,6 +308,10 @@ def plot_speedup(rows, filename):
             if key in serial_map and key in openmp_map:
                 srow = serial_map[key]
                 orow = openmp_map[key]
+                if not math.isfinite(srow["execution_time_s"]) or not math.isfinite(orow["execution_time_s"]):
+                    continue
+                if srow["execution_time_s"] <= 0 or orow["execution_time_s"] <= 0:
+                    continue
                 x.append(n)
                 y.append(srow["execution_time_s"] / orow["execution_time_s"])
         if x:
@@ -274,6 +353,10 @@ def plot_efficiency(rows, filename):
                         continue
                     resource_count = mrow.get("threads") or mrow.get("compute_units") or 1
                     if resource_count <= 0:
+                        continue
+                    if not math.isfinite(srow["execution_time_s"]) or not math.isfinite(mrow["execution_time_s"]):
+                        continue
+                    if srow["execution_time_s"] <= 0 or mrow["execution_time_s"] <= 0:
                         continue
                     speedup = srow["execution_time_s"] / mrow["execution_time_s"]
                     x.append(n)
@@ -336,7 +419,8 @@ def draw_plots(rows):
     )
     plot_speedup(rows, "speedup_openmp_vs_serial.png")
     plot_efficiency(rows, "efficiency_vs_n.png")
-    plt.show()
+    if "agg" not in plt.get_backend().lower():
+        plt.show()
 
 
 def main():

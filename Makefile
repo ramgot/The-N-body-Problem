@@ -9,12 +9,17 @@
 # Compiler selection
 CXX = g++
 CXX_SYCL = icpx
+ONEAPI_SETVARS ?= /opt/intel/oneapi/setvars.sh
 
 # Compiler flags
 CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -fPIC
 CXXFLAGS_DEBUG = -std=c++17 -Wall -Wextra -g -O0
 CXXFLAGS_OMP = $(CXXFLAGS) -fopenmp -DENABLE_OPENMP
 CXXFLAGS_SYCL = -std=c++17 -Wall -Wextra -O2 -fsycl
+
+# Load Intel oneAPI for SYCL commands when it is installed in the default path.
+SYCL_ENV = if [ -f "$(ONEAPI_SETVARS)" ]; then . "$(ONEAPI_SETVARS)" >/dev/null 2>&1; fi
+SYCL_CHECK = if ! command -v "$(CXX_SYCL)" >/dev/null 2>&1; then echo "Error: $(CXX_SYCL) not found. Install Intel oneAPI or set ONEAPI_SETVARS=/path/to/setvars.sh"; exit 127; fi
 
 # Directories
 COMMON_DIR = Common
@@ -78,17 +83,17 @@ setup: obj
 # COMMON LIBRARY OBJECTS
 # ============================================================================
 
-$(OBJ_DIR)/body.o: $(COMMON_DIR)/src/body.cpp $(COMMON_DIR)/include/body.h
+$(OBJ_DIR)/body.o: $(COMMON_DIR)/src/body.cpp $(COMMON_DIR)/include/body.h | setup
 	$(CXX) $(CXXFLAGS) $(COMMON_INCLUDE) -c $< -o $@
 
-$(OBJ_DIR)/Vector3.o: $(COMMON_DIR)/src/Vector3.cpp $(COMMON_DIR)/include/vector3.h
+$(OBJ_DIR)/Vector3.o: $(COMMON_DIR)/src/Vector3.cpp $(COMMON_DIR)/include/vector3.h | setup
 	$(CXX) $(CXXFLAGS) $(COMMON_INCLUDE) -c $< -o $@
 
 # ============================================================================
 # N-BODY SERIAL VERSION
 # ============================================================================
 
-$(NBODY_SERIAL_OBJ): $(NBODY_SERIAL_SRC)
+$(NBODY_SERIAL_OBJ): $(NBODY_SERIAL_SRC) | setup
 	$(CXX) $(CXXFLAGS) $(NBODY_INCLUDE) -c $< -o $@
 
 $(NBODY_SERIAL_EXE): $(NBODY_SERIAL_OBJ) $(COMMON_OBJS)
@@ -99,7 +104,7 @@ $(NBODY_SERIAL_EXE): $(NBODY_SERIAL_OBJ) $(COMMON_OBJS)
 # N-BODY OpenMP VERSION
 # ============================================================================
 
-$(NBODY_OMP_OBJ): $(NBODY_OMP_SRC)
+$(NBODY_OMP_OBJ): $(NBODY_OMP_SRC) | setup
 	$(CXX) $(CXXFLAGS_OMP) $(NBODY_INCLUDE) -c $< -o $@
 
 $(NBODY_OMP_EXE): $(NBODY_OMP_OBJ) $(COMMON_OBJS)
@@ -110,21 +115,21 @@ $(NBODY_OMP_EXE): $(NBODY_OMP_OBJ) $(COMMON_OBJS)
 # N-BODY SYCL VERSION (with Intel oneAPI)
 # ============================================================================
 
-$(NBODY_SYCL_OBJ): $(NBODY_SYCL_SRC)
-	$(CXX_SYCL) $(CXXFLAGS_SYCL) $(NBODY_INCLUDE) -c $< -o $@
+$(NBODY_SYCL_OBJ): $(NBODY_SYCL_SRC) | setup
+	@$(SYCL_ENV); $(SYCL_CHECK); $(CXX_SYCL) $(CXXFLAGS_SYCL) $(NBODY_INCLUDE) -c $< -o $@
 
 $(NBODY_SYCL_EXE): $(NBODY_SYCL_OBJ) $(COMMON_OBJS)
-	$(CXX_SYCL) $(CXXFLAGS_SYCL) $(NBODY_INCLUDE) $^ -o $@
+	@$(SYCL_ENV); $(SYCL_CHECK); $(CXX_SYCL) $(CXXFLAGS_SYCL) $(NBODY_INCLUDE) $^ -o $@
 	@echo "Built SYCL version: $@"
 
 # ============================================================================
 # TWO-BODY ANALYTICAL SOLUTION
 # ============================================================================
 
-$(OBJ_DIR)/two_body_solver.o: $(TWOBODY_DIR)/src/two_body_solver.cpp $(TWOBODY_DIR)/include/two_body_solver.h
+$(OBJ_DIR)/two_body_solver.o: $(TWOBODY_DIR)/src/two_body_solver.cpp $(TWOBODY_DIR)/include/two_body_solver.h | setup
 	$(CXX) $(CXXFLAGS) $(TWOBODY_INCLUDE) -c $< -o $@
 
-$(OBJ_DIR)/test_main.o: $(TWOBODY_DIR)/src/test_main.cpp
+$(OBJ_DIR)/test_main.o: $(TWOBODY_DIR)/src/test_main.cpp | setup
 	$(CXX) $(CXXFLAGS) $(TWOBODY_INCLUDE) -c $< -o $@
 
 $(TWOBODY_EXE): $(OBJ_DIR)/two_body_solver.o $(OBJ_DIR)/test_main.o $(COMMON_OBJS)
@@ -196,7 +201,7 @@ run-openmp: $(NBODY_OMP_EXE)
 	./$(NBODY_OMP_EXE)
 
 run-sycl: $(NBODY_SYCL_EXE)
-	@bash -c 'source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1 || true; ./$(NBODY_SYCL_EXE)'
+	@$(SYCL_ENV); ./$(NBODY_SYCL_EXE)
 
 run-twobody: $(TWOBODY_EXE)
 	./$(TWOBODY_EXE)
@@ -225,6 +230,7 @@ help:
 	@echo "Configuration variables:"
 	@echo "  CXX              - C++ compiler (default: g++)"
 	@echo "  CXX_SYCL         - SYCL compiler (default: icpx from Intel oneAPI)"
+	@echo "  ONEAPI_SETVARS   - Path to Intel oneAPI setvars.sh (default: /opt/intel/oneapi/setvars.sh)"
 	@echo "  BUILD_MODE       - Release or Debug (default: Release)"
 	@echo "  SYCL_BACKEND     - nvidia or opencl (default: nvidia)"
 	@echo ""
@@ -247,8 +253,8 @@ help:
 check-compilers:
 	@echo "Checking available compilers..."
 	@which $(CXX) > /dev/null && echo "✓ $(CXX) found" || echo "✗ $(CXX) NOT found"
-	@which $(CXX_SYCL) > /dev/null && echo "✓ $(CXX_SYCL) found" || echo "✗ $(CXX_SYCL) NOT found (SYCL support disabled)"
-	@which icpx > /dev/null && echo "✓ Intel oneAPI found" || echo "✗ Intel oneAPI NOT found"
+	@$(SYCL_ENV); which $(CXX_SYCL) > /dev/null && echo "✓ $(CXX_SYCL) found" || echo "✗ $(CXX_SYCL) NOT found (SYCL support disabled)"
+	@[ -f "$(ONEAPI_SETVARS)" ] && echo "✓ Intel oneAPI setvars found" || echo "✗ Intel oneAPI setvars NOT found"
 
 # ============================================================================
 # PHONY TARGETS

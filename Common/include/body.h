@@ -14,6 +14,7 @@ struct Body {
     Body();
     Body(const Vector3& pos, const Vector3& vel, double m);
     Body(const Body& other);
+    Body& operator=(const Body& other) = default;
 
     // Methods
     void resetAcceleration();

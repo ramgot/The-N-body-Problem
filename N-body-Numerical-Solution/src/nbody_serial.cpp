@@ -80,6 +80,10 @@ public:
         std::cout << "Total steps to compute: " << steps << std::endl;
         std::cout << "Progress: 0%" << std::flush;
 
+        SystemState initial_state(bodies, 0.0);
+        initial_state.computeConservedQuantities();
+        computeAccelerations();
+
         // Main simulation loop
         for (size_t step_count = 0; step_count < steps; ++step_count) {
             integrationStep();
@@ -107,10 +111,6 @@ public:
         current_state.bodies = bodies;
         current_state.time = steps * dt;
         current_state.computeConservedQuantities();
-
-        // Compute initial state for error calculation
-        SystemState initial_state(bodies, 0.0);
-        initial_state.computeConservedQuantities();
 
         metrics.energy_error = current_state.energyError(initial_state);
 
