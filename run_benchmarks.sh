@@ -24,6 +24,7 @@ fi
 FORCE=""
 PLOT_ONLY=""
 BUILD_SYCL=""
+DEVICE="auto"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -39,6 +40,18 @@ while [[ $# -gt 0 ]]; do
             BUILD_SYCL="yes"
             shift
             ;;
+        --device)
+            if [ -z "${2:-}" ]; then
+                echo -e "${RED}Error: --device requires auto, cpu, or gpu${NC}"
+                exit 1
+            fi
+            DEVICE="$2"
+            shift 2
+            ;;
+        --device=*)
+            DEVICE="${1#*=}"
+            shift
+            ;;
         --help)
             echo "Usage: $0 [options]"
             echo ""
@@ -46,6 +59,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --force      Force re-run benchmarks (overwrite existing results)"
             echo "  --plot-only  Only generate plots from existing data"
             echo "  --with-sycl  Include SYCL version in benchmarks"
+            echo "  --device DEV Select SYCL device: auto, cpu, or gpu"
             echo "  --help       Show this help message"
             echo ""
             echo "Examples:"
@@ -53,6 +67,7 @@ while [[ $# -gt 0 ]]; do
             echo "  $0 --force           # Force re-run all benchmarks"
             echo "  $0 --plot-only       # Generate plots only"
             echo "  $0 --with-sycl       # Include SYCL benchmarks"
+            echo "  $0 --with-sycl --device gpu"
             exit 0
             ;;
         *)
@@ -62,6 +77,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ "$DEVICE" != "auto" && "$DEVICE" != "cpu" && "$DEVICE" != "gpu" ]]; then
+    echo -e "${RED}Error: --device must be auto, cpu, or gpu${NC}"
+    exit 1
+fi
 
 # Check dependencies
 echo -e "${YELLOW}Checking dependencies...${NC}"
@@ -90,12 +110,13 @@ fi
 
 # Check SYCL if requested
 if [ "$BUILD_SYCL" = "yes" ]; then
-    if ! command -v icpx &> /dev/null; then
-        echo -e "${RED}Error: Intel oneAPI compiler (icpx) not found${NC}"
-        echo "Install Intel oneAPI or remove --with-sycl option"
+    CXX_SYCL="${CXX_SYCL:-/opt/adaptivecpp/bin/acpp}"
+    if ! command -v "$CXX_SYCL" &> /dev/null; then
+        echo -e "${RED}Error: AdaptiveCpp compiler not found: $CXX_SYCL${NC}"
+        echo "Set CXX_SYCL=/path/to/acpp or export PATH=/opt/adaptivecpp/bin:\$PATH"
         exit 1
     fi
-    echo -e "${GREEN}✓ Intel oneAPI compiler found${NC}"
+    echo -e "${GREEN}✓ AdaptiveCpp compiler found: $CXX_SYCL${NC}"
 fi
 
 echo ""
@@ -129,7 +150,7 @@ if [ "$PLOT_ONLY" = "yes" ]; then
     fi
     python3 benchmark.py --plot
 else
-    python3 benchmark.py --run $FORCE
+    python3 benchmark.py --run $FORCE --device "$DEVICE"
 fi
 
 if [ $? -ne 0 ]; then

@@ -7,7 +7,43 @@
 #include <chrono>
 #include <stdexcept>
 #include <string>
+#include <algorithm>
+#include <cctype>
 #include <sycl/sycl.hpp>
+
+std::string toLower(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return value;
+}
+
+sycl::queue createQueue(const std::string& device_choice) {
+    std::string choice = toLower(device_choice);
+    if (choice == "gpu") {
+        return sycl::queue(sycl::gpu_selector_v);
+    }
+    if (choice == "cpu") {
+        return sycl::queue(sycl::cpu_selector_v);
+    }
+    if (choice == "auto" || choice == "default") {
+        return sycl::queue(sycl::default_selector_v);
+    }
+    throw std::invalid_argument("Unknown SYCL device choice '" + device_choice + "'. Use auto, cpu, or gpu.");
+}
+
+std::string syclDeviceTypeToString(sycl::info::device_type device_type) {
+    if (device_type == sycl::info::device_type::gpu) {
+        return "GPU";
+    }
+    if (device_type == sycl::info::device_type::cpu) {
+        return "CPU";
+    }
+    if (device_type == sycl::info::device_type::accelerator) {
+        return "ACCELERATOR";
+    }
+    return "UNKNOWN";
+}
 
 // ========================================
 // SYCL N-Body Simulation Class
@@ -28,10 +64,14 @@ private:
     sycl::buffer<double> mass;
 
     sycl::queue q;
+    std::string device_choice;
+    std::string device_name;
+    std::string device_type_str;
     size_t compute_units;
 
 public:
-    NBodySimulationSYCL(const std::vector<Body>& initial_bodies, double dt_, double t_max_, double soft_)
+    NBodySimulationSYCL(const std::vector<Body>& initial_bodies, double dt_, double t_max_, double soft_,
+                        const std::string& device_choice_)
         : num_bodies(initial_bodies.size()), dt(dt_), t_max(t_max_), softening(soft_), bodies(initial_bodies),
           pos_x(sycl::range<1>(num_bodies)),
           pos_y(sycl::range<1>(num_bodies)),
@@ -43,7 +83,10 @@ public:
           acc_y(sycl::range<1>(num_bodies)),
           acc_z(sycl::range<1>(num_bodies)),
           mass(sycl::range<1>(num_bodies)),
-          q(sycl::default_selector_v),
+          q(createQueue(device_choice_)),
+          device_choice(toLower(device_choice_)),
+          device_name(q.get_device().get_info<sycl::info::device::name>()),
+          device_type_str(syclDeviceTypeToString(q.get_device().get_info<sycl::info::device::device_type>())),
           compute_units(q.get_device().get_info<sycl::info::device::max_compute_units>()) {
         auto posx = pos_x.get_host_access(sycl::write_only);
         auto posy = pos_y.get_host_access(sycl::write_only);
@@ -210,25 +253,9 @@ public:
     PerformanceMetrics run() {
         PerformanceMetrics metrics;
         size_t steps = static_cast<size_t>(t_max / dt);
-        
-        // Get device info
-        auto device = q.get_device();
-        auto device_name = device.get_info<sycl::info::device::name>();
-        auto device_type = device.get_info<sycl::info::device::device_type>();
-        
-        // Determine if GPU or CPU
-        std::string device_type_str;
-        if (device_type == sycl::info::device_type::gpu) {
-            device_type_str = "GPU";
-        } else if (device_type == sycl::info::device_type::cpu) {
-            device_type_str = "CPU";
-        } else if (device_type == sycl::info::device_type::accelerator) {
-            device_type_str = "ACCELERATOR";
-        } else {
-            device_type_str = "UNKNOWN";
-        }
-        
+
         std::cout << "Starting simulation on device:" << std::endl;
+        std::cout << "  Requested Device: " << device_choice << std::endl;
         std::cout << "  Device Type: " << device_type_str << std::endl;
         std::cout << "  Device Name: " << device_name << std::endl;
         std::cout << "  Compute Units: " << compute_units << std::endl;
@@ -283,6 +310,8 @@ public:
     }
 
     size_t getComputeUnits() const { return compute_units; }
+    const std::string& getDeviceName() const { return device_name; }
+    const std::string& getDeviceType() const { return device_type_str; }
 };
 
 // ========================================
@@ -321,21 +350,36 @@ int main(int argc, char** argv){
         double dt = 3600.0;
         double t_max = 24*3600;
         std::string scenario = "auto";
+        std::string device_choice = "auto";
 
         if(argc > 1) n_bodies = std::stoul(argv[1]);
         if(argc > 2) dt = std::stod(argv[2]);
         if(argc > 3) t_max = std::stod(argv[3]);
         if(argc > 4) scenario = argv[4];
+        for (int i = 5; i < argc; ++i) {
+            std::string arg = argv[i];
+            if (arg == "--device" && i + 1 < argc) {
+                device_choice = argv[++i];
+            } else if (arg.rfind("--device=", 0) == 0) {
+                device_choice = arg.substr(std::string("--device=").size());
+            } else if (arg == "--help" || arg == "-h") {
+                std::cout << "Usage: " << argv[0] << " [N] [dt] [t_max] [scenario] [--device auto|cpu|gpu]" << std::endl;
+                return 0;
+            } else {
+                throw std::invalid_argument("Unknown argument '" + arg + "'");
+            }
+        }
 
         std::cout << "N-Body Simulation (SYCL Velocity Verlet)" << std::endl;
         std::cout << "Number of bodies: " << n_bodies << std::endl;
         std::cout << "Time step: " << dt << " s" << std::endl;
         std::cout << "Total time: " << t_max/3600 << " hours" << std::endl;
         std::cout << "Scenario: " << scenario << std::endl;
+        std::cout << "Requested device: " << toLower(device_choice) << std::endl;
 
         std::vector<Body> bodies = createScenarioBodies(n_bodies, scenario);
 
-        NBodySimulationSYCL simulation(bodies, dt, t_max, 1e3);
+        NBodySimulationSYCL simulation(bodies, dt, t_max, 1e3, device_choice);
         PerformanceMetrics metrics = simulation.run();
 
         std::cout << "\nResults:" << std::endl;
@@ -344,6 +388,8 @@ int main(int argc, char** argv){
         std::cout << "Performance: " << metrics.gflops << " GFLOP/s" << std::endl;
         std::cout << "Energy error: " << metrics.energy_error << std::endl;
         std::cout << "Steps completed: " << metrics.steps_completed << std::endl;
+        std::cout << "Device type: " << simulation.getDeviceType() << std::endl;
+        std::cout << "Device name: " << simulation.getDeviceName() << std::endl;
         std::cout << "Compute units: " << simulation.getComputeUnits() << std::endl;
 
         return 0;
