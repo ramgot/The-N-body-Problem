@@ -17,6 +17,9 @@ import shlex
 import subprocess
 from pathlib import Path
 
+_MPLCONFIGDIR = Path.cwd() / "benchmark_results" / "matplotlib_cache"
+_MPLCONFIGDIR.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("MPLCONFIGDIR", str(_MPLCONFIGDIR.resolve()))
 import matplotlib.pyplot as plt
 
 # Benchmark configuration
@@ -56,11 +59,14 @@ CSV_HEADERS = [
     "steps_completed",
     "threads",
     "compute_units",
+    "device_type",
+    "device_name",
     "command",
 ]
 
 RESULTS_DIR = Path("benchmark_results")
 PLOTS_DIR = RESULTS_DIR / "plots"
+ACPP_CACHE_DIR = RESULTS_DIR / "acpp_cache"
 CSV_PATH = RESULTS_DIR / "benchmark_results.csv"
 DEFAULT_ONEAPI_SETVARS = Path("/opt/intel/oneapi/setvars.sh")
 _ONEAPI_ENV_CACHE = None
@@ -75,6 +81,8 @@ OUTPUT_PATTERNS = {
 OPTIONAL_PATTERNS = {
     "threads": re.compile(r"(?:Number\s+of\s+threads|Threads):\s*(\d+)", re.IGNORECASE),
     "compute_units": re.compile(r"Compute\s+Units:\s*(\d+)", re.IGNORECASE),
+    "device_type": re.compile(r"Device\s+Type:\s*(.+)", re.IGNORECASE),
+    "device_name": re.compile(r"Device\s+Name:\s*(.+)", re.IGNORECASE),
 }
 
 
@@ -106,6 +114,9 @@ def load_oneapi_env():
         return _ONEAPI_ENV_CACHE
 
     env = os.environ.copy()
+    ACPP_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    env.setdefault("ACPP_APPDB_DIR", str(ACPP_CACHE_DIR.resolve()))
+    env.setdefault("MPLCONFIGDIR", str((RESULTS_DIR / "matplotlib_cache").resolve()))
     setvars_path = Path(os.environ.get("ONEAPI_SETVARS", DEFAULT_ONEAPI_SETVARS))
     if not setvars_path.exists():
         print(f"Warning: oneAPI setvars not found at {setvars_path}; running SYCL with current environment.")
@@ -144,12 +155,15 @@ def parse_metrics(output: str):
 
     for key, pattern in OPTIONAL_PATTERNS.items():
         match = pattern.search(output)
-        data[key] = int(match.group(1)) if match else 0
+        if key in {"threads", "compute_units"}:
+            data[key] = int(match.group(1)) if match else 0
+        else:
+            data[key] = match.group(1).strip() if match else ""
 
     return data
 
 
-def run_simulation(method: str, n_bodies: int, t_hours: float):
+def run_simulation(method: str, n_bodies: int, t_hours: float, device_choice: str):
     skip_reason = SKIPPED_BENCHMARKS.get((method, n_bodies, int(t_hours)))
     if skip_reason:
         print(f"Skipping {method} | N={n_bodies} | T={t_hours}h: {skip_reason}")
@@ -171,6 +185,8 @@ def run_simulation(method: str, n_bodies: int, t_hours: float):
         command.append(str(requested_threads))
 
     command.append(scenario)
+    if method == "sycl":
+        command.extend(["--device", device_choice])
 
     print(f"Running {method} | N={n_bodies} | T={t_hours}h | cmd={command}")
     env = load_oneapi_env() if method == "sycl" else None
@@ -200,6 +216,8 @@ def run_simulation(method: str, n_bodies: int, t_hours: float):
         "t_max_s": t_max_s,
         "threads": reported_threads,
         "compute_units": metrics.get("compute_units", 0),
+        "device_type": metrics.get("device_type", ""),
+        "device_name": metrics.get("device_name", ""),
         "command": " ".join(command),
     })
     return metrics
@@ -234,6 +252,8 @@ def load_results():
             row["steps_completed"] = int(row["steps_completed"])
             row["threads"] = int(row["threads"]) if row.get("threads") else 0
             row["compute_units"] = int(row["compute_units"]) if row.get("compute_units") else 0
+            row["device_type"] = row.get("device_type", "")
+            row["device_name"] = row.get("device_name", "")
             rows.append(row)
     return rows
 
@@ -428,6 +448,12 @@ def main():
     parser.add_argument("--run", action="store_true", help="Run benchmark suite")
     parser.add_argument("--plot", action="store_true", help="Plot results from CSV")
     parser.add_argument("--force", action="store_true", help="Force re-run and overwrite CSV file")
+    parser.add_argument(
+        "--device",
+        choices=["auto", "cpu", "gpu"],
+        default="auto",
+        help="SYCL device for benchmark runs (serial/OpenMP are always CPU implementations)",
+    )
     args = parser.parse_args()
 
     if not args.run and not args.plot:
@@ -444,7 +470,7 @@ def main():
             for method in METHODS:
                 for n_bodies in NS:
                     for t_hours in TIMES_HOURS:
-                        row = run_simulation(method, n_bodies, t_hours)
+                        row = run_simulation(method, n_bodies, t_hours, args.device)
                         if row is not None:
                             benchmark_rows.append(row)
             save_results(benchmark_rows)
