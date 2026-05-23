@@ -95,7 +95,7 @@ BUILD_MODE ?= Release
 # TARGETS
 # ============================================================================
 
-.PHONY: all all-sycl clean run run-serial run-openmp run-sycl run-twobody help \
+.PHONY: all all-sycl clean run run-serial run-openmp run-sycl run-twobody gui gui-bg help \
 	check-compilers check-acpp print-acpp-config benchmark benchmark-full plots \
 	quick-benchmark quick-benchmark-sycl clean-benchmark clean-all setup obj
 
@@ -246,6 +246,13 @@ run-sycl-omp: $(NBODY_SYCL_EXE)
 run-twobody: $(TWOBODY_EXE)
 	./$(TWOBODY_EXE)
 
+gui:
+	python3 nbody_gui.py
+
+gui-bg:
+	nohup python3 nbody_gui.py >/tmp/nbody_gui.log 2>&1 &
+	@echo "N-body GUI started in background. Log: /tmp/nbody_gui.log"
+
 print-acpp-config:
 	@echo "CXX_SYCL       = $(CXX_SYCL)"
 	@echo "ACPP_HOME      = $(ACPP_HOME)"
@@ -281,6 +288,8 @@ help:
 	@echo "  run-sycl-cuda        - Run SYCL version with only CUDA backend visible"
 	@echo "  run-sycl-omp         - Run SYCL version with only OpenMP backend visible"
 	@echo "  run-twobody          - Build and run two-body solver"
+	@echo "  gui                  - Open the Tkinter launcher"
+	@echo "  gui-bg               - Open the launcher in background and return the terminal"
 	@echo "  benchmark            - Run benchmark suite and save results"
 	@echo "  benchmark-full       - Run benchmark suite and generate plots"
 	@echo "  plots                - Generate plots from existing benchmark data"
