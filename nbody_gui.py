@@ -3,6 +3,7 @@
 """Windowed launcher for N-body simulations and benchmarks."""
 
 import csv
+import codecs
 import datetime
 import json
 import math
@@ -14,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 try:
@@ -90,6 +92,9 @@ class NBodyGui:
         self.root.geometry("1080x760")
         self.log_queue = queue.Queue()
         self.running = False
+        self.run_started_at = None
+        self.active_command = ""
+        self.status_after_id = None
 
         self._create_vars()
         self._build_ui()
@@ -125,6 +130,7 @@ class NBodyGui:
         self.bench_force = tk.BooleanVar(value=True)
         self.bench_make_plots = tk.BooleanVar(value=True)
         self.bench_default_skips = tk.BooleanVar(value=True)
+        self.status_text = tk.StringVar(value="Готово")
 
         self.gen_n = tk.StringVar(value="100")
         self.gen_seed = tk.StringVar(value="12345")
@@ -323,7 +329,16 @@ class NBodyGui:
         frame.grid(row=1, column=0, sticky="nsew")
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(1, weight=1)
-        ttk.Label(frame, text="Журнал").grid(row=0, column=0, sticky="w")
+
+        header = ttk.Frame(frame)
+        header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        header.columnconfigure(1, weight=1)
+        ttk.Label(header, text="Журнал").grid(row=0, column=0, sticky="w")
+        ttk.Label(header, textvariable=self.status_text).grid(row=0, column=1, sticky="e", padx=(12, 8))
+        self.activity = ttk.Progressbar(header, mode="indeterminate", length=150)
+        self.activity.grid(row=0, column=2, sticky="e")
+        self.activity.grid_remove()
+
         self.log = tk.Text(frame, height=12, wrap="word")
         self.log.grid(row=1, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(frame, orient="vertical", command=self.log.yview)
@@ -346,18 +361,67 @@ class NBodyGui:
             variable.set(path)
 
     def _append_log(self, text):
-        self.log.insert("end", text)
+        chunks = str(text).split("\r")
+        self.log.insert("end", chunks[0])
+        for chunk in chunks[1:]:
+            self.log.delete("end-1c linestart", "end-1c")
+            self.log.insert("end", chunk)
         self.log.see("end")
+
+    def _format_elapsed(self):
+        if self.run_started_at is None:
+            return "00:00"
+        elapsed = int(time.monotonic() - self.run_started_at)
+        minutes, seconds = divmod(elapsed, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        return f"{minutes:02d}:{seconds:02d}"
+
+    def _short_command(self, command, limit=90):
+        text = shlex.join([str(part) for part in command])
+        if len(text) <= limit:
+            return text
+        return text[:limit - 1] + "…"
+
+    def _update_running_status(self):
+        if not self.running:
+            self.status_after_id = None
+            return
+        self.status_text.set(f"Выполняется {self._format_elapsed()}: {self.active_command}")
+        self.status_after_id = self.root.after(1000, self._update_running_status)
+
+    def _start_running_status(self, command):
+        self.run_started_at = time.monotonic()
+        self.active_command = self._short_command(command)
+        self.status_text.set(f"Запуск: {self.active_command}")
+        self.activity.grid()
+        self.activity.start(12)
+        if self.status_after_id is not None:
+            self.root.after_cancel(self.status_after_id)
+        self.status_after_id = self.root.after(1000, self._update_running_status)
+        self.root.update_idletasks()
+
+    def _finish_running_status(self, returncode):
+        if self.status_after_id is not None:
+            self.root.after_cancel(self.status_after_id)
+            self.status_after_id = None
+        self.activity.stop()
+        self.activity.grid_remove()
+        self.status_text.set(f"Завершено за {self._format_elapsed()} · код {returncode}")
+        self.run_started_at = None
+        self.active_command = ""
 
     def _poll_log_queue(self):
         try:
             while True:
                 item = self.log_queue.get_nowait()
-                if item[0] == "line":
+                if item[0] in {"line", "output"}:
                     self._append_log(item[1])
                 elif item[0] == "complete":
                     _, returncode, output, callback = item
                     self.running = False
+                    self._finish_running_status(returncode)
                     if callback:
                         callback(returncode, output)
                     self._append_log(f"\nProcess finished with code {returncode}\n")
@@ -365,33 +429,44 @@ class NBodyGui:
             pass
         self.root.after(100, self._poll_log_queue)
 
-    def _run_process(self, command, *, env=None, callback=None):
+    def _run_process(self, command, *, env=None, env_factory=None, callback=None):
         if self.running:
             messagebox.showwarning("Процесс уже идет", "Дождись завершения текущего запуска.")
             return
         self.running = True
+        self._start_running_status(command)
         self._append_log("\n$ " + shlex.join([str(part) for part in command]) + "\n")
 
         def worker():
             output_parts = []
             try:
+                process_env = env_factory() if env_factory is not None else env
                 process = subprocess.Popen(
                     [str(part) for part in command],
                     cwd=str(ROOT),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                    env=env,
+                    bufsize=0,
+                    env=process_env,
                 )
                 assert process.stdout is not None
-                for line in process.stdout:
-                    output_parts.append(line)
-                    self.log_queue.put(("line", line))
+                decoder = codecs.getincrementaldecoder("utf-8")("replace")
+                while True:
+                    raw_chunk = os.read(process.stdout.fileno(), 4096)
+                    if not raw_chunk:
+                        break
+                    text_chunk = decoder.decode(raw_chunk)
+                    if text_chunk:
+                        output_parts.append(text_chunk)
+                        self.log_queue.put(("output", text_chunk))
+                tail = decoder.decode(b"", final=True)
+                if tail:
+                    output_parts.append(tail)
+                    self.log_queue.put(("output", tail))
                 returncode = process.wait()
             except Exception as exc:
                 output_parts.append(f"{exc}\n")
-                self.log_queue.put(("line", f"{exc}\n"))
+                self.log_queue.put(("output", f"{exc}\n"))
                 returncode = 1
             self.log_queue.put(("complete", returncode, "".join(output_parts), callback))
 
@@ -479,10 +554,10 @@ class NBodyGui:
         if method == "sycl":
             command.extend(["--device", self.sim_device.get()])
 
-        env = benchmark.load_oneapi_env() if method == "sycl" else None
+        env_factory = benchmark.load_oneapi_env if method == "sycl" else None
         self._run_process(
             command,
-            env=env,
+            env_factory=env_factory,
             callback=lambda returncode, output: self._save_single_run(
                 returncode, output, method, n_bodies, dt_s, t_hours, threads, scenario, body_file, command
             ),
@@ -574,7 +649,7 @@ class NBodyGui:
             messagebox.showerror("Ошибка параметров", str(exc))
             return
 
-        command = [sys.executable, ROOT / "benchmark.py", "--config", config_path, "--run"]
+        command = [sys.executable, "-u", ROOT / "benchmark.py", "--config", config_path, "--run"]
         if self.bench_make_plots.get():
             command.append("--plot")
         if self.bench_force.get():
@@ -587,7 +662,7 @@ class NBodyGui:
         except ValueError as exc:
             messagebox.showerror("Ошибка параметров", str(exc))
             return
-        self._run_process([sys.executable, ROOT / "benchmark.py", "--config", config_path, "--plot"])
+        self._run_process([sys.executable, "-u", ROOT / "benchmark.py", "--config", config_path, "--plot"])
 
     def save_benchmark_config(self):
         try:

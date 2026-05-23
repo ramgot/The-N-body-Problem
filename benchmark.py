@@ -8,6 +8,7 @@ Usage:
 """
 
 import argparse
+import codecs
 import csv
 import datetime
 import json
@@ -269,13 +270,13 @@ def run_simulation(
 
     skip_reason = SKIPPED_BENCHMARKS.get((method, n_bodies, int(t_hours))) if use_default_skips else None
     if skip_reason:
-        print(f"Skipping {method} | N={n_bodies} | T={t_hours}h: {skip_reason}")
+        print(f"Skipping {method} | N={n_bodies} | T={t_hours}h: {skip_reason}", flush=True)
         return None
 
     exe_name = METHODS[method]
     exe_path = find_executable(exe_name)
     if exe_path is None:
-        print(f"Warning: executable for method '{method}' not found. Skipping.")
+        print(f"Warning: executable for method '{method}' not found. Skipping.", flush=True)
         return None
 
     t_max_s = t_hours * 3600.0
@@ -293,17 +294,39 @@ def run_simulation(
     if method == "sycl":
         command.extend(["--device", device_choice])
 
-    print(f"Running {method} | N={n_bodies} | T={t_hours}h | cmd={command}")
+    print(f"Running {method} | N={n_bodies} | T={t_hours}h | cmd={command}", flush=True)
     env = load_oneapi_env() if method == "sycl" else None
-    process = subprocess.run(command, capture_output=True, text=True, env=env)
-    if process.returncode != 0:
+    output_parts = []
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=0,
+        env=env,
+    )
+    assert process.stdout is not None
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    while True:
+        raw_chunk = os.read(process.stdout.fileno(), 4096)
+        if not raw_chunk:
+            break
+        chunk = decoder.decode(raw_chunk)
+        if chunk:
+            output_parts.append(chunk)
+            print(chunk, end="", flush=True)
+    tail = decoder.decode(b"", final=True)
+    if tail:
+        output_parts.append(tail)
+        print(tail, end="", flush=True)
+    returncode = process.wait()
+    output = "".join(output_parts)
+    if returncode != 0:
         raise RuntimeError(
             f"Benchmark failed for {exe_name} N={n_bodies} T={t_hours}h\n"
-            f"stdout:\n{process.stdout}\n"
-            f"stderr:\n{process.stderr}"
+            f"output:\n{output}"
         )
 
-    metrics = parse_metrics(process.stdout)
+    metrics = parse_metrics(output)
     reported_threads = metrics.get("threads", 0)
     if method == "serial":
         reported_threads = 1
