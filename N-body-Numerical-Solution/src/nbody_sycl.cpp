@@ -21,13 +21,13 @@ std::string toLower(std::string value) {
 sycl::queue createQueue(const std::string& device_choice) {
     std::string choice = toLower(device_choice);
     if (choice == "gpu") {
-        return sycl::queue(sycl::gpu_selector_v);
+        return sycl::queue(sycl::gpu_selector_v, sycl::property::queue::in_order{});
     }
     if (choice == "cpu") {
-        return sycl::queue(sycl::cpu_selector_v);
+        return sycl::queue(sycl::cpu_selector_v, sycl::property::queue::in_order{});
     }
     if (choice == "auto" || choice == "default") {
-        return sycl::queue(sycl::default_selector_v);
+        return sycl::queue(sycl::default_selector_v, sycl::property::queue::in_order{});
     }
     throw std::invalid_argument("Unknown SYCL device choice '" + device_choice + "'. Use auto, cpu, or gpu.");
 }
@@ -57,13 +57,14 @@ private:
 
     std::vector<Body> bodies;
 
-    // SYCL buffers for positions, velocities, accelerations, masses
-    sycl::buffer<double> pos_x, pos_y, pos_z;
-    sycl::buffer<double> vel_x, vel_y, vel_z;
-    sycl::buffer<double> acc_x, acc_y, acc_z;
-    sycl::buffer<double> mass;
-
     sycl::queue q;
+
+    // Device USM arrays for positions, velocities, accelerations, masses.
+    double *pos_x, *pos_y, *pos_z;
+    double *vel_x, *vel_y, *vel_z;
+    double *acc_x, *acc_y, *acc_z;
+    double *mass;
+
     std::string device_choice;
     std::string device_name;
     std::string device_type_str;
@@ -73,40 +74,72 @@ public:
     NBodySimulationSYCL(const std::vector<Body>& initial_bodies, double dt_, double t_max_, double soft_,
                         const std::string& device_choice_)
         : num_bodies(initial_bodies.size()), dt(dt_), t_max(t_max_), softening(soft_), bodies(initial_bodies),
-          pos_x(sycl::range<1>(num_bodies)),
-          pos_y(sycl::range<1>(num_bodies)),
-          pos_z(sycl::range<1>(num_bodies)),
-          vel_x(sycl::range<1>(num_bodies)),
-          vel_y(sycl::range<1>(num_bodies)),
-          vel_z(sycl::range<1>(num_bodies)),
-          acc_x(sycl::range<1>(num_bodies)),
-          acc_y(sycl::range<1>(num_bodies)),
-          acc_z(sycl::range<1>(num_bodies)),
-          mass(sycl::range<1>(num_bodies)),
           q(createQueue(device_choice_)),
+          pos_x(sycl::malloc_device<double>(num_bodies, q)),
+          pos_y(sycl::malloc_device<double>(num_bodies, q)),
+          pos_z(sycl::malloc_device<double>(num_bodies, q)),
+          vel_x(sycl::malloc_device<double>(num_bodies, q)),
+          vel_y(sycl::malloc_device<double>(num_bodies, q)),
+          vel_z(sycl::malloc_device<double>(num_bodies, q)),
+          acc_x(sycl::malloc_device<double>(num_bodies, q)),
+          acc_y(sycl::malloc_device<double>(num_bodies, q)),
+          acc_z(sycl::malloc_device<double>(num_bodies, q)),
+          mass(sycl::malloc_device<double>(num_bodies, q)),
           device_choice(toLower(device_choice_)),
           device_name(q.get_device().get_info<sycl::info::device::name>()),
           device_type_str(syclDeviceTypeToString(q.get_device().get_info<sycl::info::device::device_type>())),
           compute_units(q.get_device().get_info<sycl::info::device::max_compute_units>()) {
-        auto posx = pos_x.get_host_access(sycl::write_only);
-        auto posy = pos_y.get_host_access(sycl::write_only);
-        auto posz = pos_z.get_host_access(sycl::write_only);
-        auto velx = vel_x.get_host_access(sycl::write_only);
-        auto vely = vel_y.get_host_access(sycl::write_only);
-        auto velz = vel_z.get_host_access(sycl::write_only);
-        auto m = mass.get_host_access(sycl::write_only);
+        if (!pos_x || !pos_y || !pos_z || !vel_x || !vel_y || !vel_z ||
+            !acc_x || !acc_y || !acc_z || !mass) {
+            throw std::runtime_error("Failed to allocate SYCL device USM memory.");
+        }
+
+        std::vector<double> host_pos_x(num_bodies), host_pos_y(num_bodies), host_pos_z(num_bodies);
+        std::vector<double> host_vel_x(num_bodies), host_vel_y(num_bodies), host_vel_z(num_bodies);
+        std::vector<double> host_mass(num_bodies);
 
         for(size_t i = 0; i < num_bodies; ++i){
-            posx[i] = bodies[i].position.x;
-            posy[i] = bodies[i].position.y;
-            posz[i] = bodies[i].position.z;
-            velx[i] = bodies[i].velocity.x;
-            vely[i] = bodies[i].velocity.y;
-            velz[i] = bodies[i].velocity.z;
-            m[i] = bodies[i].mass;
+            host_pos_x[i] = bodies[i].position.x;
+            host_pos_y[i] = bodies[i].position.y;
+            host_pos_z[i] = bodies[i].position.z;
+            host_vel_x[i] = bodies[i].velocity.x;
+            host_vel_y[i] = bodies[i].velocity.y;
+            host_vel_z[i] = bodies[i].velocity.z;
+            host_mass[i] = bodies[i].mass;
         }
+
+        const size_t bytes = num_bodies * sizeof(double);
+        q.memcpy(pos_x, host_pos_x.data(), bytes);
+        q.memcpy(pos_y, host_pos_y.data(), bytes);
+        q.memcpy(pos_z, host_pos_z.data(), bytes);
+        q.memcpy(vel_x, host_vel_x.data(), bytes);
+        q.memcpy(vel_y, host_vel_y.data(), bytes);
+        q.memcpy(vel_z, host_vel_z.data(), bytes);
+        q.memcpy(mass, host_mass.data(), bytes);
+        q.memset(acc_x, 0, bytes);
+        q.memset(acc_y, 0, bytes);
+        q.memset(acc_z, 0, bytes);
+        q.wait_and_throw();
+
         std::cout << "Initialization complete." << std::endl;
     }
+
+    ~NBodySimulationSYCL() {
+        sycl::free(pos_x, q);
+        sycl::free(pos_y, q);
+        sycl::free(pos_z, q);
+        sycl::free(vel_x, q);
+        sycl::free(vel_y, q);
+        sycl::free(vel_z, q);
+        sycl::free(acc_x, q);
+        sycl::free(acc_y, q);
+        sycl::free(acc_z, q);
+        sycl::free(mass, q);
+    }
+
+    NBodySimulationSYCL(const NBodySimulationSYCL&) = delete;
+    NBodySimulationSYCL& operator=(const NBodySimulationSYCL&) = delete;
+
     void computeAccelerations() {
         const size_t TILE = 128;
         size_t N = num_bodies;
@@ -116,14 +149,14 @@ public:
 
         q.submit([&](sycl::handler& h) {
 
-            auto px = pos_x.get_access<sycl::access::mode::read>(h);
-            auto py = pos_y.get_access<sycl::access::mode::read>(h);
-            auto pz = pos_z.get_access<sycl::access::mode::read>(h);
-            auto m  = mass.get_access<sycl::access::mode::read>(h);
+            const double* px = pos_x;
+            const double* py = pos_y;
+            const double* pz = pos_z;
+            const double* m = mass;
 
-            auto ax = acc_x.get_access<sycl::access::mode::write>(h);
-            auto ay = acc_y.get_access<sycl::access::mode::write>(h);
-            auto az = acc_z.get_access<sycl::access::mode::write>(h);
+            double* ax = acc_x;
+            double* ay = acc_y;
+            double* az = acc_z;
 
             sycl::local_accessor<double,1> tile_x(TILE,h);
             sycl::local_accessor<double,1> tile_y(TILE,h);
@@ -199,14 +232,15 @@ public:
 
         // First half of velocity update
         q.submit([&](sycl::handler& h){
-            auto vx = vel_x.get_access<sycl::access::mode::read_write>(h);
-            auto vy = vel_y.get_access<sycl::access::mode::read_write>(h);
-            auto vz = vel_z.get_access<sycl::access::mode::read_write>(h);
-            auto ax = acc_x.get_access<sycl::access::mode::read>(h);
-            auto ay = acc_y.get_access<sycl::access::mode::read>(h);
-            auto az = acc_z.get_access<sycl::access::mode::read>(h);
+            double* vx = vel_x;
+            double* vy = vel_y;
+            double* vz = vel_z;
+            const double* ax = acc_x;
+            const double* ay = acc_y;
+            const double* az = acc_z;
 
-            h.parallel_for(N, [=](auto i){
+            h.parallel_for(sycl::range<1>(N), [=](sycl::id<1> idx){
+                size_t i = idx[0];
                 vx[i] += 0.5*dt_local*ax[i];
                 vy[i] += 0.5*dt_local*ay[i];
                 vz[i] += 0.5*dt_local*az[i];
@@ -215,14 +249,15 @@ public:
 
         // Update positions
         q.submit([&](sycl::handler& h){
-            auto vx = vel_x.get_access<sycl::access::mode::read>(h);
-            auto vy = vel_y.get_access<sycl::access::mode::read>(h);
-            auto vz = vel_z.get_access<sycl::access::mode::read>(h);
-            auto px = pos_x.get_access<sycl::access::mode::read_write>(h);
-            auto py = pos_y.get_access<sycl::access::mode::read_write>(h);
-            auto pz = pos_z.get_access<sycl::access::mode::read_write>(h);
+            const double* vx = vel_x;
+            const double* vy = vel_y;
+            const double* vz = vel_z;
+            double* px = pos_x;
+            double* py = pos_y;
+            double* pz = pos_z;
 
-            h.parallel_for(N, [=](auto i){
+            h.parallel_for(sycl::range<1>(N), [=](sycl::id<1> idx){
+                size_t i = idx[0];
                 px[i] += dt_local*vx[i];
                 py[i] += dt_local*vy[i];
                 pz[i] += dt_local*vz[i];
@@ -233,14 +268,15 @@ public:
 
         // Second half of velocity update
         q.submit([&](sycl::handler& h){
-            auto vx = vel_x.get_access<sycl::access::mode::read_write>(h);
-            auto vy = vel_y.get_access<sycl::access::mode::read_write>(h);
-            auto vz = vel_z.get_access<sycl::access::mode::read_write>(h);
-            auto ax = acc_x.get_access<sycl::access::mode::read>(h);
-            auto ay = acc_y.get_access<sycl::access::mode::read>(h);
-            auto az = acc_z.get_access<sycl::access::mode::read>(h);
+            double* vx = vel_x;
+            double* vy = vel_y;
+            double* vz = vel_z;
+            const double* ax = acc_x;
+            const double* ay = acc_y;
+            const double* az = acc_z;
 
-            h.parallel_for(N, [=](auto i){
+            h.parallel_for(sycl::range<1>(N), [=](sycl::id<1> idx){
+                size_t i = idx[0];
                 vx[i] += 0.5*dt_local*ax[i];
                 vy[i] += 0.5*dt_local*ay[i];
                 vz[i] += 0.5*dt_local*az[i];
@@ -282,17 +318,21 @@ public:
         auto end_time = std::chrono::high_resolution_clock::now();
         metrics.execution_time = std::chrono::duration<double>(end_time - start_time).count();
 
-        // Read back final state from device buffers
-        auto posx = pos_x.get_host_access(sycl::read_only);
-        auto posy = pos_y.get_host_access(sycl::read_only);
-        auto posz = pos_z.get_host_access(sycl::read_only);
-        auto velx = vel_x.get_host_access(sycl::read_only);
-        auto vely = vel_y.get_host_access(sycl::read_only);
-        auto velz = vel_z.get_host_access(sycl::read_only);
+        // Read back final state from device USM arrays.
+        std::vector<double> host_pos_x(num_bodies), host_pos_y(num_bodies), host_pos_z(num_bodies);
+        std::vector<double> host_vel_x(num_bodies), host_vel_y(num_bodies), host_vel_z(num_bodies);
+        const size_t bytes = num_bodies * sizeof(double);
+        q.memcpy(host_pos_x.data(), pos_x, bytes);
+        q.memcpy(host_pos_y.data(), pos_y, bytes);
+        q.memcpy(host_pos_z.data(), pos_z, bytes);
+        q.memcpy(host_vel_x.data(), vel_x, bytes);
+        q.memcpy(host_vel_y.data(), vel_y, bytes);
+        q.memcpy(host_vel_z.data(), vel_z, bytes);
+        q.wait_and_throw();
 
         for (size_t i = 0; i < num_bodies; ++i) {
-            bodies[i].position = Vector3(posx[i], posy[i], posz[i]);
-            bodies[i].velocity = Vector3(velx[i], vely[i], velz[i]);
+            bodies[i].position = Vector3(host_pos_x[i], host_pos_y[i], host_pos_z[i]);
+            bodies[i].velocity = Vector3(host_vel_x[i], host_vel_y[i], host_vel_z[i]);
         }
 
         SystemState final_state(bodies, t_max);
