@@ -1,10 +1,13 @@
 #include "../../Common/include/body.h"
 #include "../../Common/include/common.h"
+#include "../../Common/include/trajectory_writer.h"
 
+#include <array>
 #include <iostream>
 #include <vector>
 #include <cmath>
 #include <chrono>
+#include <future>
 #include <stdexcept>
 #include <string>
 #include <algorithm>
@@ -43,6 +46,26 @@ std::string syclDeviceTypeToString(sycl::info::device_type device_type) {
         return "ACCELERATOR";
     }
     return "UNKNOWN";
+}
+
+enum class TrajectoryMode {
+    Async,
+    Sync
+};
+
+TrajectoryMode parseTrajectoryMode(const std::string& value) {
+    const std::string mode = toLower(value);
+    if (mode == "async") {
+        return TrajectoryMode::Async;
+    }
+    if (mode == "sync") {
+        return TrajectoryMode::Sync;
+    }
+    throw std::invalid_argument("Unknown trajectory mode '" + value + "'. Use async or sync.");
+}
+
+std::string trajectoryModeToString(TrajectoryMode mode) {
+    return mode == TrajectoryMode::Async ? "async" : "sync";
 }
 
 // ========================================
@@ -226,7 +249,7 @@ public:
         });
     }
 
-    void integrationStep() {
+    void integrationStep(bool wait_for_completion = true) {
         size_t N = num_bodies;
         double dt_local = dt;
 
@@ -283,10 +306,13 @@ public:
             });
         });
 
-        q.wait_and_throw();
+        if (wait_for_completion) {
+            q.wait_and_throw();
+        }
     }
 
-    PerformanceMetrics run() {
+    PerformanceMetrics run(const std::string& trajectory_path = "",
+                           TrajectoryMode trajectory_mode = TrajectoryMode::Async) {
         PerformanceMetrics metrics;
         size_t steps = static_cast<size_t>(t_max / dt);
 
@@ -300,18 +326,133 @@ public:
         SystemState initial_state(bodies, 0.0);
         initial_state.computeConservedQuantities();
 
+        TrajectoryWriter trajectory(trajectory_path);
+        const bool write_trajectory = trajectory.enabled();
+        const size_t bytes = num_bodies * sizeof(double);
+        std::vector<double> host_mass(num_bodies);
+        for (size_t i = 0; i < num_bodies; ++i) {
+            host_mass[i] = bodies[i].mass;
+        }
+
+        struct TrajectorySnapshot {
+            std::vector<double> pos_x, pos_y, pos_z;
+            std::vector<double> vel_x, vel_y, vel_z;
+            std::vector<double> acc_x, acc_y, acc_z;
+            std::shared_future<void> write_done;
+
+            void resize(size_t n) {
+                pos_x.resize(n);
+                pos_y.resize(n);
+                pos_z.resize(n);
+                vel_x.resize(n);
+                vel_y.resize(n);
+                vel_z.resize(n);
+                acc_x.resize(n);
+                acc_y.resize(n);
+                acc_z.resize(n);
+            }
+        };
+
+        std::array<TrajectorySnapshot, 2> snapshots;
+        if (write_trajectory) {
+            for (auto& snapshot : snapshots) {
+                snapshot.resize(num_bodies);
+            }
+        }
+
+        std::shared_future<void> previous_write;
+        auto copyTrajectorySnapshot = [&](TrajectorySnapshot& snapshot) {
+            q.memcpy(snapshot.pos_x.data(), pos_x, bytes);
+            q.memcpy(snapshot.pos_y.data(), pos_y, bytes);
+            q.memcpy(snapshot.pos_z.data(), pos_z, bytes);
+            q.memcpy(snapshot.vel_x.data(), vel_x, bytes);
+            q.memcpy(snapshot.vel_y.data(), vel_y, bytes);
+            q.memcpy(snapshot.vel_z.data(), vel_z, bytes);
+            q.memcpy(snapshot.acc_x.data(), acc_x, bytes);
+            q.memcpy(snapshot.acc_y.data(), acc_y, bytes);
+            return q.memcpy(snapshot.acc_z.data(), acc_z, bytes);
+        };
+
+        auto writeTrajectorySnapshot = [&](size_t step,
+                                           double time_s,
+                                           const TrajectorySnapshot& snapshot) {
+            trajectory.writeArrays(
+                step,
+                time_s,
+                host_mass,
+                snapshot.pos_x,
+                snapshot.pos_y,
+                snapshot.pos_z,
+                snapshot.vel_x,
+                snapshot.vel_y,
+                snapshot.vel_z,
+                snapshot.acc_x,
+                snapshot.acc_y,
+                snapshot.acc_z
+            );
+        };
+
+        auto scheduleAsyncTrajectorySnapshot = [&](size_t step, double time_s) {
+            const size_t buffer_index = step % snapshots.size();
+            TrajectorySnapshot& snapshot = snapshots[buffer_index];
+            if (snapshot.write_done.valid()) {
+                snapshot.write_done.get();
+            }
+
+            sycl::event ready_event = copyTrajectorySnapshot(snapshot);
+            std::shared_future<void> wait_for_previous = previous_write;
+            snapshot.write_done = std::async(
+                std::launch::async,
+                [&, step, time_s, buffer_index, ready_event, wait_for_previous]() mutable {
+                    if (wait_for_previous.valid()) {
+                        wait_for_previous.get();
+                    }
+                    ready_event.wait_and_throw();
+                    const TrajectorySnapshot& ready_snapshot = snapshots[buffer_index];
+                    writeTrajectorySnapshot(step, time_s, ready_snapshot);
+                }
+            ).share();
+            previous_write = snapshot.write_done;
+        };
+
+        auto writeSyncTrajectorySnapshot = [&](size_t step, double time_s) {
+            TrajectorySnapshot& snapshot = snapshots.front();
+            sycl::event ready_event = copyTrajectorySnapshot(snapshot);
+            ready_event.wait_and_throw();
+            writeTrajectorySnapshot(step, time_s, snapshot);
+        };
+
+        auto recordTrajectorySnapshot = [&](size_t step, double time_s) {
+            if (trajectory_mode == TrajectoryMode::Async) {
+                scheduleAsyncTrajectorySnapshot(step, time_s);
+            } else {
+                writeSyncTrajectorySnapshot(step, time_s);
+            }
+        };
+
         auto start_time = std::chrono::high_resolution_clock::now();
 
         computeAccelerations();
         q.wait_and_throw();
+        if (write_trajectory) {
+            recordTrajectorySnapshot(0, 0.0);
+        }
 
         for(size_t step = 0; step < steps; ++step){
-            integrationStep();
+            integrationStep(!write_trajectory);
+            if (write_trajectory) {
+                recordTrajectorySnapshot(step + 1, (step + 1) * dt);
+            }
 
             if(steps > 100 && step % (steps/10) == 0){
                 std::cout << "\rProgress: " << (step*100)/steps << "%" << std::flush;
             }
         }
+
+        if (previous_write.valid()) {
+            previous_write.get();
+        }
+        q.wait_and_throw();
 
         std::cout << "\rProgress: 100%" << std::endl;
 
@@ -321,18 +462,22 @@ public:
         // Read back final state from device USM arrays.
         std::vector<double> host_pos_x(num_bodies), host_pos_y(num_bodies), host_pos_z(num_bodies);
         std::vector<double> host_vel_x(num_bodies), host_vel_y(num_bodies), host_vel_z(num_bodies);
-        const size_t bytes = num_bodies * sizeof(double);
+        std::vector<double> host_acc_x(num_bodies), host_acc_y(num_bodies), host_acc_z(num_bodies);
         q.memcpy(host_pos_x.data(), pos_x, bytes);
         q.memcpy(host_pos_y.data(), pos_y, bytes);
         q.memcpy(host_pos_z.data(), pos_z, bytes);
         q.memcpy(host_vel_x.data(), vel_x, bytes);
         q.memcpy(host_vel_y.data(), vel_y, bytes);
         q.memcpy(host_vel_z.data(), vel_z, bytes);
+        q.memcpy(host_acc_x.data(), acc_x, bytes);
+        q.memcpy(host_acc_y.data(), acc_y, bytes);
+        q.memcpy(host_acc_z.data(), acc_z, bytes);
         q.wait_and_throw();
 
         for (size_t i = 0; i < num_bodies; ++i) {
             bodies[i].position = Vector3(host_pos_x[i], host_pos_y[i], host_pos_z[i]);
             bodies[i].velocity = Vector3(host_vel_x[i], host_vel_y[i], host_vel_z[i]);
+            bodies[i].acceleration = Vector3(host_acc_x[i], host_acc_y[i], host_acc_z[i]);
         }
 
         SystemState final_state(bodies, t_max);
@@ -396,6 +541,8 @@ int main(int argc, char** argv){
         std::string scenario = "auto";
         std::string device_choice = "auto";
         std::string body_file;
+        std::string trajectory_file;
+        TrajectoryMode trajectory_mode = TrajectoryMode::Async;
 
         int positional = 0;
         for (int i = 1; i < argc; ++i) {
@@ -416,9 +563,27 @@ int main(int argc, char** argv){
                 body_file = arg.substr(std::string("--bodies=").size());
                 continue;
             }
+            if (arg == "--trajectory" && i + 1 < argc) {
+                trajectory_file = argv[++i];
+                continue;
+            }
+            if (arg.rfind("--trajectory=", 0) == 0) {
+                trajectory_file = arg.substr(std::string("--trajectory=").size());
+                continue;
+            }
+            if (arg == "--trajectory-mode" && i + 1 < argc) {
+                trajectory_mode = parseTrajectoryMode(argv[++i]);
+                continue;
+            }
+            if (arg.rfind("--trajectory-mode=", 0) == 0) {
+                trajectory_mode = parseTrajectoryMode(arg.substr(std::string("--trajectory-mode=").size()));
+                continue;
+            }
             if (arg == "--help" || arg == "-h") {
                 std::cout << "Usage: " << argv[0]
-                          << " [N] [dt] [t_max] [scenario] [--bodies path] [--device auto|cpu|gpu]"
+                          << " [N] [dt] [t_max] [scenario] [--bodies path]"
+                          << " [--device auto|cpu|gpu] [--trajectory path]"
+                          << " [--trajectory-mode async|sync]"
                           << std::endl;
                 return 0;
             }
@@ -446,6 +611,15 @@ int main(int argc, char** argv){
         if (!body_file.empty()) {
             std::cout << "Body configuration: " << body_file << std::endl;
         }
+        if (!trajectory_file.empty()) {
+            std::cout << "Trajectory output: " << trajectory_file << std::endl;
+            std::cout << "Trajectory mode: " << trajectoryModeToString(trajectory_mode) << std::endl;
+            if (trajectory_mode == TrajectoryMode::Async) {
+                std::cout << "Trajectory writer: asynchronous host-side CSV writer" << std::endl;
+            } else {
+                std::cout << "Trajectory writer: synchronous host-side CSV writer" << std::endl;
+            }
+        }
 
         std::vector<Body> bodies = body_file.empty() ? createScenarioBodies(n_bodies, scenario)
                                                      : InitialConditions::loadFromCsv(body_file);
@@ -455,7 +629,7 @@ int main(int argc, char** argv){
         }
 
         NBodySimulationSYCL simulation(bodies, dt, t_max, 1e3, device_choice);
-        PerformanceMetrics metrics = simulation.run();
+        PerformanceMetrics metrics = simulation.run(trajectory_file, trajectory_mode);
 
         std::cout << "\nResults:" << std::endl;
         std::cout << "--------" << std::endl;
