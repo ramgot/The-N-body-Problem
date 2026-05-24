@@ -30,6 +30,11 @@ except ImportError as exc:
 ROOT = Path(__file__).resolve().parent
 os.chdir(ROOT)
 
+if TKINTER_IMPORT_ERROR is None:
+    from trajectory_viewer import TrajectoryViewerFrame
+else:
+    TrajectoryViewerFrame = None
+
 import benchmark
 
 CONFIG_DIR = ROOT / "configs"
@@ -155,13 +160,16 @@ class NBodyGui:
         sim_tab = ttk.Frame(notebook, padding=12)
         bench_tab = ttk.Frame(notebook, padding=12)
         config_tab = ttk.Frame(notebook, padding=12)
+        visualization_tab = ttk.Frame(notebook, padding=12)
         notebook.add(sim_tab, text="Симуляция")
         notebook.add(bench_tab, text="Бенчмарк")
         notebook.add(config_tab, text="Конфигурации тел")
+        notebook.add(visualization_tab, text="Визуализация")
 
         self._build_simulation_tab(sim_tab)
         self._build_benchmark_tab(bench_tab)
         self._build_config_tab(config_tab)
+        self._build_visualization_tab(visualization_tab)
         self._build_log()
 
     def _build_simulation_tab(self, parent):
@@ -360,6 +368,17 @@ class NBodyGui:
         ttk.Button(button_frame, text="В бенчмарк",
                    command=lambda: self._use_generated_file(self.bench_body_file, self.bench_scenario)).pack(
             side="left", padx=(8, 0))
+
+    def _build_visualization_tab(self, parent):
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(0, weight=1)
+
+        self.trajectory_viewer = TrajectoryViewerFrame(
+            parent,
+            initial_path=self.sim_trajectory.get(),
+            initial_format="auto",
+        )
+        self.trajectory_viewer.grid(row=0, column=0, sticky="nsew")
 
     def _build_log(self):
         frame = ttk.Frame(self.root, padding=(10, 0, 10, 10))
@@ -670,6 +689,8 @@ class NBodyGui:
             }
             benchmark.save_results([row], csv_path)
             self._append_log(f"Saved run metrics to {csv_path}\n")
+            if trajectory_file and hasattr(self, "trajectory_viewer"):
+                self.trajectory_viewer.set_path(trajectory_file, trajectory_format)
         except Exception as exc:
             messagebox.showerror("CSV не сохранен", str(exc))
 

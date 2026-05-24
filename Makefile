@@ -95,7 +95,7 @@ BUILD_MODE ?= Release
 # TARGETS
 # ============================================================================
 
-.PHONY: all all-sycl clean run run-serial run-openmp run-sycl run-twobody gui gui-bg help \
+.PHONY: all all-sycl clean run run-serial run-openmp run-sycl run-twobody gui gui-bg viewer visualize help \
 	check-compilers check-acpp print-acpp-config benchmark benchmark-full plots \
 	quick-benchmark quick-benchmark-sycl clean-benchmark clean-all setup obj
 
@@ -253,6 +253,9 @@ gui-bg:
 	nohup python3 nbody_gui.py >/tmp/nbody_gui.log 2>&1 &
 	@echo "N-body GUI started in background. Log: /tmp/nbody_gui.log"
 
+viewer visualize:
+	python3 trajectory_viewer.py
+
 print-acpp-config:
 	@echo "CXX_SYCL       = $(CXX_SYCL)"
 	@echo "ACPP_HOME      = $(ACPP_HOME)"
@@ -290,6 +293,7 @@ help:
 	@echo "  run-twobody          - Build and run two-body solver"
 	@echo "  gui                  - Open the Tkinter launcher"
 	@echo "  gui-bg               - Open the launcher in background and return the terminal"
+	@echo "  viewer               - Open the trajectory viewer"
 	@echo "  benchmark            - Run benchmark suite and save results"
 	@echo "  benchmark-full       - Run benchmark suite and generate plots"
 	@echo "  plots                - Generate plots from existing benchmark data"
