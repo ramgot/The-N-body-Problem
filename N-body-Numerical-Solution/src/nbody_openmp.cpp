@@ -156,6 +156,10 @@ public:
 };
 
 std::vector<Body> createScenarioBodies(size_t N, const std::string& scenario) {
+    const std::string file_prefix = "file:";
+    if (scenario.rfind(file_prefix, 0) == 0) {
+        return InitialConditions::loadFromCsv(scenario.substr(file_prefix.size()));
+    }
     if (scenario == "auto") {
         if (N == 3) {
             return InitialConditions::sunEarthMoon();
@@ -186,16 +190,45 @@ int main(int argc, char** argv) {
     double t_max = 24 * 3600; // 1 day
     int num_threads = omp_get_max_threads();
     std::string scenario = "auto";
+    std::string body_file;
 
-    // Parse command line arguments
-    if (argc > 1) n_bodies = std::stoul(argv[1]);
-    if (argc > 2) dt = std::stod(argv[2]);
-    if (argc > 3) t_max = std::stod(argv[3]);
-    if (argc > 4) {
-        num_threads = std::stoi(argv[4]);
-    }
-    if (argc > 5) {
-        scenario = argv[5];
+    try {
+        int positional = 0;
+        for (int i = 1; i < argc; ++i) {
+            std::string arg = argv[i];
+            if (arg == "--help" || arg == "-h") {
+                std::cout << "Usage: " << argv[0]
+                          << " [N] [dt] [t_max] [threads] [scenario] [--bodies path]"
+                          << std::endl;
+                return 0;
+            }
+            if (arg == "--bodies" && i + 1 < argc) {
+                body_file = argv[++i];
+                continue;
+            }
+            if (arg.rfind("--bodies=", 0) == 0) {
+                body_file = arg.substr(std::string("--bodies=").size());
+                continue;
+            }
+
+            if (positional == 0) {
+                n_bodies = std::stoul(arg);
+            } else if (positional == 1) {
+                dt = std::stod(arg);
+            } else if (positional == 2) {
+                t_max = std::stod(arg);
+            } else if (positional == 3) {
+                num_threads = std::stoi(arg);
+            } else if (positional == 4) {
+                scenario = arg;
+            } else {
+                throw std::invalid_argument("Unexpected argument '" + arg + "'");
+            }
+            ++positional;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Error parsing command line: " << e.what() << std::endl;
+        return 1;
     }
 
     omp_set_num_threads(num_threads);
@@ -207,8 +240,22 @@ int main(int argc, char** argv) {
     std::cout << "Total time: " << t_max / 3600 << " hours" << std::endl;
     std::cout << "Number of threads: " << num_threads << std::endl;
     std::cout << "Scenario: " << scenario << std::endl;
+    if (!body_file.empty()) {
+        std::cout << "Body configuration: " << body_file << std::endl;
+    }
 
-    std::vector<Body> bodies = createScenarioBodies(n_bodies, scenario);
+    std::vector<Body> bodies;
+    try {
+        bodies = body_file.empty() ? createScenarioBodies(n_bodies, scenario)
+                                   : InitialConditions::loadFromCsv(body_file);
+    } catch (const std::exception& e) {
+        std::cerr << "Error loading initial conditions: " << e.what() << std::endl;
+        return 1;
+    }
+    n_bodies = bodies.size();
+    if (!body_file.empty()) {
+        std::cout << "Loaded bodies: " << n_bodies << std::endl;
+    }
 
     SimulationParams params(n_bodies, dt, t_max);
     NBodySimulationOMP simulation(bodies, params);

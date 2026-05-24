@@ -57,6 +57,7 @@
 - **C++17 компилятор** (GCC 7+, Clang 5+, MSVC 2017+)
 - **CMake 3.15+** (для альтернативной сборки)
 - **Python 3.6+** с matplotlib (для графиков бенчмарков)
+- **python3-tk** (для оконного запускателя `nbody_gui.py`)
 
 ### Для OpenMP версии
 - **OpenMP 3.0+** (обычно включен в GCC/Clang)
@@ -68,6 +69,11 @@
 ### Для графиков
 ```bash
 pip install matplotlib numpy
+```
+
+### Для оконного запускателя
+```bash
+sudo apt-get install python3-tk
 ```
 
 ## ⚙️ Установка Intel oneAPI (для SYCL/GPU)
@@ -188,6 +194,32 @@ python3 benchmark.py --plot
 python3 benchmark.py --force
 ```
 
+### Оконный запускатель
+```bash
+make gui        # открыть окно в текущем терминале
+make gui-bg     # открыть окно в фоне и сразу вернуть терминал
+
+# или без сборки
+python3 nbody_gui.py
+```
+
+Окно позволяет запускать одиночные симуляции, выбирать методы бенчмарка,
+задавать `N`, `dt`, время моделирования, OpenMP-потоки и SYCL-устройство,
+сохранять/загружать JSON-конфиги бенчмарков, выбирать CSV и папку графиков.
+Сборку можно запускать кнопками внутри окна: если выбран SYCL, будет использован
+`make all-sycl`, иначе `make all`.
+Во вкладке конфигураций можно создать воспроизводимый файл начальных тел
+`*.bodies.csv` для случайного случая и затем использовать его в serial,
+OpenMP и SYCL через сценарий `body-file`.
+Пример JSON-конфига лежит в `configs/default_benchmark.json`.
+
+Те же возможности доступны из CLI:
+```bash
+python3 benchmark.py --config configs/my_benchmark.json --run --plot --force
+python3 benchmark.py --methods serial,openmp --n-values 100,1000 --times-hours 24,168 \
+  --results-csv benchmark_results/custom.csv --plots-dir benchmark_results/custom_plots
+```
+
 ### Графики производительности
 - **execution_time_vs_n.png** - Время выполнения vs количество тел
 - **gflops_vs_n.png** - Производительность GFLOP/s vs количество тел
@@ -201,13 +233,13 @@ python3 benchmark.py --force
 
 #### Последовательная версия
 ```bash
-./nbody_serial N DT T_MAX [SCENARIO]
+./nbody_serial N DT T_MAX [SCENARIO] [--bodies PATH]
 # Пример: ./nbody_serial 100 3600 86400 random
 ```
 
 #### OpenMP версия
 ```bash
-./nbody_openmp N DT T_MAX [THREADS] [SCENARIO]
+./nbody_openmp N DT T_MAX [THREADS] [SCENARIO] [--bodies PATH]
 # Пример: ./nbody_openmp 1000 3600 86400 8 random
 ```
 
@@ -221,7 +253,7 @@ python3 benchmark.py --force
 make run-sycl
 
 # Способ 3: Прямой запуск (требует ручной активации oneAPI)
-./nbody_sycl N DT T_MAX [SCENARIO]
+./nbody_sycl N DT T_MAX [SCENARIO] [--bodies PATH] [--device auto|cpu|gpu]
 # Пример: ./nbody_sycl 1000 3600 86400 solar-system
 ```
 
@@ -401,6 +433,8 @@ time ./nbody_openmp 1000 3600 21600 8
   - `sun-earth-moon` - Солнце-Земля-Луна
   - `solar-system` - Солнечная система
   - `random` - случайные тела
+- `--bodies PATH` - загрузить начальные тела из CSV (`mass,x,y,z,vx,vy,vz`);
+  удобно для воспроизводимых случайных конфигураций
 
 ### Примеры сценариев
 

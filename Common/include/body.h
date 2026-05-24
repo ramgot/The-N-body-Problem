@@ -2,6 +2,7 @@
 #define BODY_H
 
 #include "vector3.h"
+#include <string>
 #include <vector>
 
 struct Body {
@@ -51,6 +52,7 @@ namespace InitialConditions {
     std::vector<Body> sunEarthMoon();
     std::vector<Body> solarSystem();
     std::vector<Body> randomSphere(size_t N, double total_mass, double radius, unsigned int seed = 0);
+    std::vector<Body> loadFromCsv(const std::string& filepath);
 }
 
 #endif // BODY_H

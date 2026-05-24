@@ -358,6 +358,10 @@ public:
 // Scenario-based initial conditions
 // ========================================
 std::vector<Body> createScenarioBodies(size_t N, const std::string& scenario) {
+    const std::string file_prefix = "file:";
+    if (scenario.rfind(file_prefix, 0) == 0) {
+        return InitialConditions::loadFromCsv(scenario.substr(file_prefix.size()));
+    }
     if (scenario == "auto") {
         if (N == 3) {
             return InitialConditions::sunEarthMoon();
@@ -391,23 +395,46 @@ int main(int argc, char** argv){
         double t_max = 24*3600;
         std::string scenario = "auto";
         std::string device_choice = "auto";
+        std::string body_file;
 
-        if(argc > 1) n_bodies = std::stoul(argv[1]);
-        if(argc > 2) dt = std::stod(argv[2]);
-        if(argc > 3) t_max = std::stod(argv[3]);
-        if(argc > 4) scenario = argv[4];
-        for (int i = 5; i < argc; ++i) {
+        int positional = 0;
+        for (int i = 1; i < argc; ++i) {
             std::string arg = argv[i];
             if (arg == "--device" && i + 1 < argc) {
                 device_choice = argv[++i];
-            } else if (arg.rfind("--device=", 0) == 0) {
-                device_choice = arg.substr(std::string("--device=").size());
-            } else if (arg == "--help" || arg == "-h") {
-                std::cout << "Usage: " << argv[0] << " [N] [dt] [t_max] [scenario] [--device auto|cpu|gpu]" << std::endl;
-                return 0;
-            } else {
-                throw std::invalid_argument("Unknown argument '" + arg + "'");
+                continue;
             }
+            if (arg.rfind("--device=", 0) == 0) {
+                device_choice = arg.substr(std::string("--device=").size());
+                continue;
+            }
+            if (arg == "--bodies" && i + 1 < argc) {
+                body_file = argv[++i];
+                continue;
+            }
+            if (arg.rfind("--bodies=", 0) == 0) {
+                body_file = arg.substr(std::string("--bodies=").size());
+                continue;
+            }
+            if (arg == "--help" || arg == "-h") {
+                std::cout << "Usage: " << argv[0]
+                          << " [N] [dt] [t_max] [scenario] [--bodies path] [--device auto|cpu|gpu]"
+                          << std::endl;
+                return 0;
+            }
+
+            if (positional == 0) {
+                n_bodies = std::stoul(arg);
+            } else if (positional == 1) {
+                dt = std::stod(arg);
+            } else if (positional == 2) {
+                t_max = std::stod(arg);
+            } else if (positional == 3) {
+                scenario = arg;
+            } else {
+                throw std::invalid_argument("Unexpected argument '" + arg + "'");
+            }
+            ++positional;
         }
 
         std::cout << "N-Body Simulation (SYCL Velocity Verlet)" << std::endl;
@@ -416,8 +443,16 @@ int main(int argc, char** argv){
         std::cout << "Total time: " << t_max/3600 << " hours" << std::endl;
         std::cout << "Scenario: " << scenario << std::endl;
         std::cout << "Requested device: " << toLower(device_choice) << std::endl;
+        if (!body_file.empty()) {
+            std::cout << "Body configuration: " << body_file << std::endl;
+        }
 
-        std::vector<Body> bodies = createScenarioBodies(n_bodies, scenario);
+        std::vector<Body> bodies = body_file.empty() ? createScenarioBodies(n_bodies, scenario)
+                                                     : InitialConditions::loadFromCsv(body_file);
+        n_bodies = bodies.size();
+        if (!body_file.empty()) {
+            std::cout << "Loaded bodies: " << n_bodies << std::endl;
+        }
 
         NBodySimulationSYCL simulation(bodies, dt, t_max, 1e3, device_choice);
         PerformanceMetrics metrics = simulation.run();

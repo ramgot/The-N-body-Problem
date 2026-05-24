@@ -8,8 +8,10 @@ Usage:
 """
 
 import argparse
+import codecs
 import csv
 import datetime
+import json
 import math
 import os
 import re
@@ -50,6 +52,7 @@ CSV_HEADERS = [
     "executable",
     "n_bodies",
     "scenario",
+    "body_config_file",
     "t_hours",
     "dt_s",
     "t_max_s",
@@ -84,6 +87,92 @@ OPTIONAL_PATTERNS = {
     "device_type": re.compile(r"Device\s+Type:\s*(.+)", re.IGNORECASE),
     "device_name": re.compile(r"Device\s+Name:\s*(.+)", re.IGNORECASE),
 }
+
+DEFAULT_BENCHMARK_CONFIG = {
+    "methods": list(METHODS.keys()),
+    "n_values": NS,
+    "times_hours": TIMES_HOURS,
+    "dt_s": FIXED_DT,
+    "scenario": None,
+    "scenario_by_n": {str(key): value for key, value in SCENARIO_BY_N.items()},
+    "body_file": None,
+    "openmp_threads": os.cpu_count() or 1,
+    "device": "auto",
+    "results_csv": str(CSV_PATH),
+    "plots_dir": str(PLOTS_DIR),
+    "use_default_skips": True,
+}
+
+
+def parse_csv_values(value, cast):
+    if value is None:
+        return None
+    items = [item.strip() for item in value.split(",") if item.strip()]
+    return [cast(item) for item in items]
+
+
+def normalize_benchmark_config(raw_config=None):
+    config = dict(DEFAULT_BENCHMARK_CONFIG)
+    if raw_config:
+        config.update(raw_config)
+
+    methods = config.get("methods") or []
+    if isinstance(methods, str):
+        methods = parse_csv_values(methods, str)
+    config["methods"] = [method.lower() for method in methods if method.lower() in METHODS]
+    if not config["methods"]:
+        raise ValueError("Benchmark configuration must include at least one known method")
+
+    n_values = config.get("n_values", NS)
+    if isinstance(n_values, str):
+        n_values = parse_csv_values(n_values, int)
+    config["n_values"] = [int(value) for value in n_values]
+
+    times_hours = config.get("times_hours", TIMES_HOURS)
+    if isinstance(times_hours, str):
+        times_hours = parse_csv_values(times_hours, float)
+    config["times_hours"] = [float(value) for value in times_hours]
+
+    config["dt_s"] = float(config.get("dt_s", FIXED_DT))
+    config["openmp_threads"] = int(config.get("openmp_threads") or (os.cpu_count() or 1))
+    config["device"] = (config.get("device") or "auto").lower()
+    if config["device"] not in {"auto", "cpu", "gpu"}:
+        raise ValueError("SYCL device must be auto, cpu, or gpu")
+
+    scenario = config.get("scenario")
+    config["scenario"] = scenario if scenario else None
+    config["scenario_by_n"] = config.get("scenario_by_n") or {
+        str(key): value for key, value in SCENARIO_BY_N.items()
+    }
+    config["body_file"] = str(config["body_file"]) if config.get("body_file") else None
+    config["results_csv"] = str(config.get("results_csv") or CSV_PATH)
+    config["plots_dir"] = str(config.get("plots_dir") or PLOTS_DIR)
+    config["use_default_skips"] = bool(config.get("use_default_skips", True))
+    return config
+
+
+def load_benchmark_config(config_path):
+    with Path(config_path).open("r", encoding="utf-8") as config_file:
+        return json.load(config_file)
+
+
+def resolve_scenario(n_bodies, scenario=None, scenario_by_n=None):
+    if scenario:
+        return scenario
+    mapping = scenario_by_n or SCENARIO_BY_N
+    return mapping.get(str(n_bodies)) or mapping.get(n_bodies) or "random"
+
+
+def scenario_display_name(n_bodies, scenario, body_file=None):
+    if body_file:
+        return f"Body file: {Path(body_file).name}"
+    labels = {
+        "auto": scenario_label(n_bodies),
+        "sun-earth-moon": "Sun-Earth-Moon",
+        "solar-system": "Solar system + Pluto",
+        "random": f"Random test ({n_bodies} bodies)",
+    }
+    return labels.get(scenario, scenario)
 
 
 def scenario_label(n):
@@ -163,42 +252,81 @@ def parse_metrics(output: str):
     return data
 
 
-def run_simulation(method: str, n_bodies: int, t_hours: float, device_choice: str):
-    skip_reason = SKIPPED_BENCHMARKS.get((method, n_bodies, int(t_hours)))
+def run_simulation(
+    method: str,
+    n_bodies: int,
+    t_hours: float,
+    device_choice: str,
+    *,
+    dt_s: float = FIXED_DT,
+    scenario: str | None = None,
+    scenario_by_n: dict | None = None,
+    body_file: str | None = None,
+    openmp_threads: int | None = None,
+    use_default_skips: bool = True,
+):
+    if method not in METHODS:
+        raise ValueError(f"Unknown benchmark method: {method}")
+
+    skip_reason = SKIPPED_BENCHMARKS.get((method, n_bodies, int(t_hours))) if use_default_skips else None
     if skip_reason:
-        print(f"Skipping {method} | N={n_bodies} | T={t_hours}h: {skip_reason}")
+        print(f"Skipping {method} | N={n_bodies} | T={t_hours}h: {skip_reason}", flush=True)
         return None
 
     exe_name = METHODS[method]
     exe_path = find_executable(exe_name)
     if exe_path is None:
-        print(f"Warning: executable for method '{method}' not found. Skipping.")
+        print(f"Warning: executable for method '{method}' not found. Skipping.", flush=True)
         return None
 
     t_max_s = t_hours * 3600.0
-    scenario = SCENARIO_BY_N.get(n_bodies, "random")
-    command = [str(exe_path), str(n_bodies), str(FIXED_DT), str(t_max_s)]
+    selected_scenario = resolve_scenario(n_bodies, scenario, scenario_by_n)
+    command = [str(exe_path), str(n_bodies), str(dt_s), str(t_max_s)]
     requested_threads = 0
 
     if method == "openmp":
-        requested_threads = os.cpu_count() or 1
+        requested_threads = int(openmp_threads or (os.cpu_count() or 1))
         command.append(str(requested_threads))
 
-    command.append(scenario)
+    command.append(selected_scenario)
+    if body_file:
+        command.extend(["--bodies", str(body_file)])
     if method == "sycl":
         command.extend(["--device", device_choice])
 
-    print(f"Running {method} | N={n_bodies} | T={t_hours}h | cmd={command}")
+    print(f"Running {method} | N={n_bodies} | T={t_hours}h | cmd={command}", flush=True)
     env = load_oneapi_env() if method == "sycl" else None
-    process = subprocess.run(command, capture_output=True, text=True, env=env)
-    if process.returncode != 0:
+    output_parts = []
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=0,
+        env=env,
+    )
+    assert process.stdout is not None
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    while True:
+        raw_chunk = os.read(process.stdout.fileno(), 4096)
+        if not raw_chunk:
+            break
+        chunk = decoder.decode(raw_chunk)
+        if chunk:
+            output_parts.append(chunk)
+            print(chunk, end="", flush=True)
+    tail = decoder.decode(b"", final=True)
+    if tail:
+        output_parts.append(tail)
+        print(tail, end="", flush=True)
+    returncode = process.wait()
+    output = "".join(output_parts)
+    if returncode != 0:
         raise RuntimeError(
             f"Benchmark failed for {exe_name} N={n_bodies} T={t_hours}h\n"
-            f"stdout:\n{process.stdout}\n"
-            f"stderr:\n{process.stderr}"
+            f"output:\n{output}"
         )
 
-    metrics = parse_metrics(process.stdout)
+    metrics = parse_metrics(output)
     reported_threads = metrics.get("threads", 0)
     if method == "serial":
         reported_threads = 1
@@ -210,9 +338,10 @@ def run_simulation(method: str, n_bodies: int, t_hours: float, device_choice: st
         "method": method,
         "executable": exe_name,
         "n_bodies": n_bodies,
-        "scenario": scenario_label(n_bodies),
+        "scenario": scenario_display_name(n_bodies, selected_scenario, body_file),
+        "body_config_file": body_file or "",
         "t_hours": t_hours,
-        "dt_s": FIXED_DT,
+        "dt_s": dt_s,
         "t_max_s": t_max_s,
         "threads": reported_threads,
         "compute_units": metrics.get("compute_units", 0),
@@ -223,23 +352,25 @@ def run_simulation(method: str, n_bodies: int, t_hours: float, device_choice: st
     return metrics
 
 
-def save_results(rows):
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    write_header = not CSV_PATH.exists()
-    with CSV_PATH.open("a", newline="", encoding="utf-8") as csvfile:
+def save_results(rows, csv_path=CSV_PATH):
+    csv_path = Path(csv_path)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not csv_path.exists()
+    with csv_path.open("a", newline="", encoding="utf-8") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=CSV_HEADERS)
         if write_header:
             writer.writeheader()
         for row in rows:
             writer.writerow({k: row.get(k, "") for k in CSV_HEADERS})
-    print(f"Saved {len(rows)} rows to {CSV_PATH}")
+    print(f"Saved {len(rows)} rows to {csv_path}")
 
 
-def load_results():
-    if not CSV_PATH.exists():
-        raise FileNotFoundError(f"Benchmark CSV not found: {CSV_PATH}")
+def load_results(csv_path=CSV_PATH):
+    csv_path = Path(csv_path)
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Benchmark CSV not found: {csv_path}")
     rows = []
-    with CSV_PATH.open("r", newline="", encoding="utf-8") as csvfile:
+    with csv_path.open("r", newline="", encoding="utf-8") as csvfile:
         reader = csv.DictReader(csvfile)
         for row in reader:
             row["n_bodies"] = int(row["n_bodies"])
@@ -258,7 +389,8 @@ def load_results():
     return rows
 
 
-def plot_line(rows, x_key, y_key, title, ylabel, filename, logx=False, logy=False, group_by="method"):
+def plot_line(rows, x_key, y_key, title, ylabel, filename, plots_dir=PLOTS_DIR,
+              logx=False, logy=False, group_by="method"):
     groups = {}
     for row in rows:
         if group_by == "method_t_hours":
@@ -305,13 +437,15 @@ def plot_line(rows, x_key, y_key, title, ylabel, filename, logx=False, logy=Fals
     ax.grid(True, which="both", linestyle="--", alpha=0.4)
     ax.legend(fontsize="small", loc="best")
     fig.tight_layout()
-    filepath = PLOTS_DIR / filename
+    plots_dir = Path(plots_dir)
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    filepath = plots_dir / filename
     fig.savefig(filepath)
     print(f"Saved plot {filepath}")
     return fig
 
 
-def plot_speedup(rows, filename):
+def plot_speedup(rows, filename, plots_dir=PLOTS_DIR):
     serial_rows = [r for r in rows if r["method"] == "serial"]
     openmp_rows = [r for r in rows if r["method"] == "openmp"]
     serial_map = {(r["n_bodies"], r["t_hours"]): r for r in serial_rows}
@@ -349,13 +483,15 @@ def plot_speedup(rows, filename):
     ax.grid(True, which="both", linestyle="--", alpha=0.4)
     ax.legend(fontsize="small", loc="best")
     fig.tight_layout()
-    filepath = PLOTS_DIR / filename
+    plots_dir = Path(plots_dir)
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    filepath = plots_dir / filename
     fig.savefig(filepath)
     print(f"Saved plot {filepath}")
     return fig
 
 
-def plot_efficiency(rows, filename):
+def plot_efficiency(rows, filename, plots_dir=PLOTS_DIR):
     serial_map = {(r["n_bodies"], r["t_hours"]): r for r in rows if r["method"] == "serial"}
     fig, ax = plt.subplots(figsize=(9, 5))
     plotted_any = False
@@ -396,14 +532,17 @@ def plot_efficiency(rows, filename):
     ax.grid(True, which="both", linestyle="--", alpha=0.4)
     ax.legend(fontsize="small", loc="best")
     fig.tight_layout()
-    filepath = PLOTS_DIR / filename
+    plots_dir = Path(plots_dir)
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    filepath = plots_dir / filename
     fig.savefig(filepath)
     print(f"Saved plot {filepath}")
     return fig
 
 
-def draw_plots(rows):
-    PLOTS_DIR.mkdir(parents=True, exist_ok=True)
+def draw_plots(rows, plots_dir=PLOTS_DIR):
+    plots_dir = Path(plots_dir)
+    plots_dir.mkdir(parents=True, exist_ok=True)
     plot_line(
         rows,
         x_key="n_bodies",
@@ -411,6 +550,7 @@ def draw_plots(rows):
         title="Execution time vs Number of bodies",
         ylabel="Execution time, s",
         filename="execution_time_vs_n.png",
+        plots_dir=plots_dir,
         logx=True,
         logy=False,
         group_by="method_t_hours",
@@ -422,6 +562,7 @@ def draw_plots(rows):
         title="Achieved performance vs Number of bodies",
         ylabel="Performance, GFLOP/s",
         filename="gflops_vs_n.png",
+        plots_dir=plots_dir,
         logx=True,
         logy=False,
         group_by="method_t_hours",
@@ -433,12 +574,13 @@ def draw_plots(rows):
         title="Relative energy error vs Number of bodies",
         ylabel="Energy error",
         filename="energy_error_vs_n.png",
+        plots_dir=plots_dir,
         logx=True,
         logy=True,
         group_by="method_t_hours",
     )
-    plot_speedup(rows, "speedup_openmp_vs_serial.png")
-    plot_efficiency(rows, "efficiency_vs_n.png")
+    plot_speedup(rows, "speedup_openmp_vs_serial.png", plots_dir=plots_dir)
+    plot_efficiency(rows, "efficiency_vs_n.png", plots_dir=plots_dir)
     if "agg" not in plt.get_backend().lower():
         plt.show()
 
@@ -448,36 +590,90 @@ def main():
     parser.add_argument("--run", action="store_true", help="Run benchmark suite")
     parser.add_argument("--plot", action="store_true", help="Plot results from CSV")
     parser.add_argument("--force", action="store_true", help="Force re-run and overwrite CSV file")
+    parser.add_argument("--config", help="Load benchmark settings from a JSON configuration file")
+    parser.add_argument("--methods", help="Comma-separated methods, e.g. serial,openmp,sycl")
+    parser.add_argument("--n-values", help="Comma-separated body counts, e.g. 3,10,100")
+    parser.add_argument("--times-hours", help="Comma-separated simulation durations in hours")
+    parser.add_argument("--dt", type=float, help="Time step in seconds")
+    parser.add_argument("--scenario", help="Scenario for all runs: auto, random, sun-earth-moon, solar-system")
+    parser.add_argument("--body-file", help="CSV file with explicit initial bodies")
+    parser.add_argument("--openmp-threads", type=int, help="OpenMP thread count")
+    parser.add_argument("--results-csv", help="Where to write/read benchmark CSV results")
+    parser.add_argument("--plots-dir", help="Directory for generated plots")
+    parser.add_argument("--no-default-skips", action="store_true", help="Do not skip known slow default cases")
     parser.add_argument(
         "--device",
         choices=["auto", "cpu", "gpu"],
-        default="auto",
+        default=None,
         help="SYCL device for benchmark runs (serial/OpenMP are always CPU implementations)",
     )
     args = parser.parse_args()
+
+    raw_config = {}
+    if args.config:
+        raw_config = load_benchmark_config(args.config)
+    config = normalize_benchmark_config(raw_config)
+
+    if args.methods:
+        config["methods"] = parse_csv_values(args.methods, str)
+    if args.n_values:
+        config["n_values"] = parse_csv_values(args.n_values, int)
+    if args.times_hours:
+        config["times_hours"] = parse_csv_values(args.times_hours, float)
+    if args.dt is not None:
+        config["dt_s"] = args.dt
+    if args.scenario:
+        config["scenario"] = args.scenario
+    if args.body_file:
+        config["body_file"] = args.body_file
+    if args.openmp_threads is not None:
+        config["openmp_threads"] = args.openmp_threads
+    if args.results_csv:
+        config["results_csv"] = args.results_csv
+    if args.plots_dir:
+        config["plots_dir"] = args.plots_dir
+    if args.device is not None:
+        config["device"] = args.device
+    if args.no_default_skips:
+        config["use_default_skips"] = False
+    config = normalize_benchmark_config(config)
 
     if not args.run and not args.plot:
         args.run = True
         args.plot = True
 
+    csv_path = Path(config["results_csv"])
+    plots_dir = Path(config["plots_dir"])
+
     if args.run:
-        if CSV_PATH.exists() and args.force:
-            CSV_PATH.unlink()
-        if CSV_PATH.exists() and not args.force:
-            print(f"CSV already exists at {CSV_PATH}. Use --force to overwrite or delete manually.")
+        if csv_path.exists() and args.force:
+            csv_path.unlink()
+        if csv_path.exists() and not args.force:
+            print(f"CSV already exists at {csv_path}. Use --force to overwrite or delete manually.")
         else:
             benchmark_rows = []
-            for method in METHODS:
-                for n_bodies in NS:
-                    for t_hours in TIMES_HOURS:
-                        row = run_simulation(method, n_bodies, t_hours, args.device)
+            for method in config["methods"]:
+                for n_bodies in config["n_values"]:
+                    for t_hours in config["times_hours"]:
+                        row = run_simulation(
+                            method,
+                            n_bodies,
+                            t_hours,
+                            config["device"],
+                            dt_s=config["dt_s"],
+                            scenario=config["scenario"],
+                            scenario_by_n=config["scenario_by_n"],
+                            body_file=config["body_file"],
+                            openmp_threads=config["openmp_threads"],
+                            use_default_skips=config["use_default_skips"],
+                        )
                         if row is not None:
                             benchmark_rows.append(row)
-            save_results(benchmark_rows)
+            save_results(benchmark_rows, csv_path)
 
     if args.plot:
-        rows = load_results()
-        draw_plots(rows)
+        rows = load_results(csv_path)
+        draw_plots(rows, plots_dir)
 
 
 if __name__ == "__main__":
