@@ -66,6 +66,8 @@ CSV_HEADERS = [
     "device_name",
     "trajectory_file",
     "trajectory_format",
+    "trajectory_fields",
+    "trajectory_stride",
     "command",
 ]
 
@@ -104,6 +106,8 @@ DEFAULT_BENCHMARK_CONFIG = {
     "plots_dir": str(PLOTS_DIR),
     "trajectory_dir": None,
     "trajectory_format": "csv",
+    "trajectory_fields": "full",
+    "trajectory_stride": 1,
     "use_default_skips": True,
 }
 
@@ -157,6 +161,12 @@ def normalize_benchmark_config(raw_config=None):
         raise ValueError("Trajectory format must be csv or binary")
     if config["trajectory_format"] == "bin":
         config["trajectory_format"] = "binary"
+    config["trajectory_fields"] = (config.get("trajectory_fields") or "full").lower()
+    if config["trajectory_fields"] not in {"positions", "position", "pos", "state", "full"}:
+        raise ValueError("Trajectory fields must be positions, state, or full")
+    if config["trajectory_fields"] in {"position", "pos"}:
+        config["trajectory_fields"] = "positions"
+    config["trajectory_stride"] = max(1, int(config.get("trajectory_stride") or 1))
     config["use_default_skips"] = bool(config.get("use_default_skips", True))
     return config
 
@@ -286,6 +296,8 @@ def run_simulation(
     use_default_skips: bool = True,
     trajectory_dir: str | None = None,
     trajectory_format: str = "csv",
+    trajectory_fields: str = "full",
+    trajectory_stride: int = 1,
 ):
     if method not in METHODS:
         raise ValueError(f"Unknown benchmark method: {method}")
@@ -325,6 +337,8 @@ def run_simulation(
     if trajectory_file is not None:
         command.extend(["--trajectory", str(trajectory_file)])
         command.extend(["--trajectory-format", trajectory_format])
+        command.extend(["--trajectory-fields", trajectory_fields])
+        command.extend(["--trajectory-stride", str(trajectory_stride)])
 
     print(f"Running {method} | N={n_bodies} | T={t_hours}h | cmd={command}", flush=True)
     env = load_oneapi_env() if method == "sycl" else None
@@ -381,6 +395,8 @@ def run_simulation(
         "device_name": metrics.get("device_name", ""),
         "trajectory_file": str(trajectory_file or ""),
         "trajectory_format": trajectory_format if trajectory_file is not None else "",
+        "trajectory_fields": trajectory_fields if trajectory_file is not None else "",
+        "trajectory_stride": trajectory_stride if trajectory_file is not None else "",
         "command": " ".join(command),
     })
     return metrics
@@ -646,6 +662,12 @@ def main():
         choices=["csv", "binary", "bin"],
         help="Trajectory file format for --trajectory-dir",
     )
+    parser.add_argument(
+        "--trajectory-fields",
+        choices=["positions", "state", "full"],
+        help="Trajectory fields to store: positions, state, or full",
+    )
+    parser.add_argument("--trajectory-stride", type=int, help="Write one trajectory frame every N simulation steps")
     parser.add_argument("--no-default-skips", action="store_true", help="Do not skip known slow default cases")
     parser.add_argument(
         "--device",
@@ -682,6 +704,10 @@ def main():
         config["trajectory_dir"] = args.trajectory_dir
     if args.trajectory_format:
         config["trajectory_format"] = args.trajectory_format
+    if args.trajectory_fields:
+        config["trajectory_fields"] = args.trajectory_fields
+    if args.trajectory_stride is not None:
+        config["trajectory_stride"] = args.trajectory_stride
     if args.device is not None:
         config["device"] = args.device
     if args.no_default_skips:
@@ -718,6 +744,8 @@ def main():
                             use_default_skips=config["use_default_skips"],
                             trajectory_dir=config["trajectory_dir"],
                             trajectory_format=config["trajectory_format"],
+                            trajectory_fields=config["trajectory_fields"],
+                            trajectory_stride=config["trajectory_stride"],
                         )
                         if row is not None:
                             benchmark_rows.append(row)

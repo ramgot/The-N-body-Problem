@@ -115,6 +115,8 @@ class NBodyGui:
         self.sim_write_trajectory = tk.BooleanVar(value=False)
         self.sim_trajectory = tk.StringVar(value=str(RESULTS_DIR / "trajectory.csv"))
         self.sim_trajectory_format = tk.StringVar(value="csv")
+        self.sim_trajectory_fields = tk.StringVar(value="full")
+        self.sim_trajectory_stride = tk.StringVar(value="1")
 
         self.method_vars = {
             "serial": tk.BooleanVar(value=True),
@@ -133,6 +135,8 @@ class NBodyGui:
         self.bench_write_trajectory = tk.BooleanVar(value=False)
         self.bench_trajectory = tk.StringVar(value=str(RESULTS_DIR / "trajectories"))
         self.bench_trajectory_format = tk.StringVar(value="csv")
+        self.bench_trajectory_fields = tk.StringVar(value="full")
+        self.bench_trajectory_stride = tk.StringVar(value="1")
         self.bench_force = tk.BooleanVar(value=True)
         self.bench_make_plots = tk.BooleanVar(value=True)
         self.bench_default_skips = tk.BooleanVar(value=True)
@@ -225,6 +229,14 @@ class NBodyGui:
         ttk.Combobox(parent, textvariable=self.sim_trajectory_format,
                      values=["csv", "binary"], state="readonly", width=16).grid(
             row=row, column=1, sticky="ew", pady=4)
+        ttk.Label(parent, text="Поля шагов").grid(row=row, column=2, sticky="w", padx=(16, 0), pady=4)
+        ttk.Combobox(parent, textvariable=self.sim_trajectory_fields,
+                     values=["positions", "state", "full"], state="readonly", width=16).grid(
+            row=row, column=3, sticky="ew", pady=4)
+
+        row += 1
+        ttk.Label(parent, text="Шаг записи").grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Entry(parent, textvariable=self.sim_trajectory_stride).grid(row=row, column=1, sticky="ew", pady=4)
 
         row += 1
         button_frame = ttk.Frame(parent)
@@ -302,6 +314,14 @@ class NBodyGui:
         ttk.Combobox(parent, textvariable=self.bench_trajectory_format,
                      values=["csv", "binary"], state="readonly", width=16).grid(
             row=row, column=1, sticky="ew", pady=4)
+        ttk.Label(parent, text="Поля шагов").grid(row=row, column=2, sticky="w", padx=(16, 0), pady=4)
+        ttk.Combobox(parent, textvariable=self.bench_trajectory_fields,
+                     values=["positions", "state", "full"], state="readonly", width=16).grid(
+            row=row, column=3, sticky="ew", pady=4)
+
+        row += 1
+        ttk.Label(parent, text="Шаг записи").grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Entry(parent, textvariable=self.bench_trajectory_stride).grid(row=row, column=1, sticky="ew", pady=4)
 
         row += 1
         options = ttk.Frame(parent)
@@ -598,6 +618,8 @@ class NBodyGui:
             threads = self._int_value(self.sim_threads, "OpenMP threads")
             scenario, body_file = self._scenario_and_body_file(self.sim_scenario, self.sim_body_file)
             trajectory_format = self.sim_trajectory_format.get()
+            trajectory_fields = self.sim_trajectory_fields.get()
+            trajectory_stride = self._int_value(self.sim_trajectory_stride, "Шаг записи")
             trajectory_file = self._single_trajectory_path(trajectory_format) if self.sim_write_trajectory.get() else ""
         except ValueError as exc:
             messagebox.showerror("Ошибка параметров", str(exc))
@@ -619,6 +641,8 @@ class NBodyGui:
         if trajectory_file:
             command.extend(["--trajectory", trajectory_file])
             command.extend(["--trajectory-format", trajectory_format])
+            command.extend(["--trajectory-fields", trajectory_fields])
+            command.extend(["--trajectory-stride", trajectory_stride])
 
         env_factory = benchmark.load_oneapi_env if method == "sycl" else None
         self._run_process(
@@ -626,12 +650,14 @@ class NBodyGui:
             env_factory=env_factory,
             callback=lambda returncode, output: self._save_single_run(
                 returncode, output, method, n_bodies, dt_s, t_hours, threads,
-                scenario, body_file, trajectory_file, trajectory_format, command
+                scenario, body_file, trajectory_file, trajectory_format,
+                trajectory_fields, trajectory_stride, command
             ),
         )
 
     def _save_single_run(self, returncode, output, method, n_bodies, dt_s, t_hours,
-                         threads, scenario, body_file, trajectory_file, trajectory_format, command):
+                         threads, scenario, body_file, trajectory_file, trajectory_format,
+                         trajectory_fields, trajectory_stride, command):
         if returncode != 0:
             return
         csv_path = self.sim_csv.get().strip()
@@ -666,6 +692,8 @@ class NBodyGui:
                 "device_name": metrics.get("device_name", ""),
                 "trajectory_file": trajectory_file,
                 "trajectory_format": trajectory_format if trajectory_file else "",
+                "trajectory_fields": trajectory_fields if trajectory_file else "",
+                "trajectory_stride": trajectory_stride if trajectory_file else "",
                 "command": " ".join(str(part) for part in command),
             }
             benchmark.save_results([row], csv_path)
@@ -700,6 +728,8 @@ class NBodyGui:
             "plots_dir": self.bench_plots.get().strip(),
             "trajectory_dir": self.bench_trajectory.get().strip() if self.bench_write_trajectory.get() else None,
             "trajectory_format": self.bench_trajectory_format.get(),
+            "trajectory_fields": self.bench_trajectory_fields.get(),
+            "trajectory_stride": self._int_value(self.bench_trajectory_stride, "Шаг записи"),
             "use_default_skips": self.bench_default_skips.get(),
         }
         return benchmark.normalize_benchmark_config(config)
@@ -773,6 +803,8 @@ class NBodyGui:
             self.bench_plots.set(config["plots_dir"])
             self.bench_write_trajectory.set(bool(config.get("trajectory_dir")))
             self.bench_trajectory_format.set(config.get("trajectory_format", "csv"))
+            self.bench_trajectory_fields.set(config.get("trajectory_fields", "full"))
+            self.bench_trajectory_stride.set(str(config.get("trajectory_stride", 1)))
             if config.get("trajectory_dir"):
                 self.bench_trajectory.set(config["trajectory_dir"])
             self.bench_default_skips.set(config["use_default_skips"])
