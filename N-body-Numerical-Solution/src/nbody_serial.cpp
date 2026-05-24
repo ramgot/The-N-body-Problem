@@ -1,5 +1,6 @@
 #include "../../Common/include/body.h"
 #include "../../Common/include/common.h"
+#include "../../Common/include/trajectory_writer.h"
 #include <iostream>
 #include <iomanip>
 #include <chrono>
@@ -70,7 +71,8 @@ public:
         }
     }
 
-    PerformanceMetrics run() {
+    PerformanceMetrics run(const std::string& trajectory_path = "",
+                           TrajectoryFormat trajectory_format = TrajectoryFormat::Csv) {
         PerformanceMetrics metrics;
         auto start_time = std::chrono::high_resolution_clock::now();
 
@@ -84,9 +86,17 @@ public:
         initial_state.computeConservedQuantities();
         computeAccelerations();
 
+        TrajectoryWriter trajectory(trajectory_path, trajectory_format);
+        if (trajectory.enabled()) {
+            trajectory.write(0, 0.0, bodies);
+        }
+
         // Main simulation loop
         for (size_t step_count = 0; step_count < steps; ++step_count) {
             integrationStep();
+            if (trajectory.enabled()) {
+                trajectory.write(step_count + 1, (step_count + 1) * dt, bodies);
+            }
             
             // Show progress every 10%
             if (steps > 100 && step_count % (steps / 10) == 0) {
@@ -165,6 +175,8 @@ int main(int argc, char** argv) {
     double t_max = 24 * 3600; // 1 day
     std::string scenario = "auto";
     std::string body_file;
+    std::string trajectory_file;
+    TrajectoryFormat trajectory_format = TrajectoryFormat::Csv;
 
     try {
         int positional = 0;
@@ -172,7 +184,9 @@ int main(int argc, char** argv) {
             std::string arg = argv[i];
             if (arg == "--help" || arg == "-h") {
                 std::cout << "Usage: " << argv[0]
-                          << " [N] [dt] [t_max] [scenario] [--bodies path]" << std::endl;
+                          << " [N] [dt] [t_max] [scenario] [--bodies path]"
+                          << " [--trajectory path] [--trajectory-format csv|binary]"
+                          << std::endl;
                 return 0;
             }
             if (arg == "--bodies" && i + 1 < argc) {
@@ -181,6 +195,22 @@ int main(int argc, char** argv) {
             }
             if (arg.rfind("--bodies=", 0) == 0) {
                 body_file = arg.substr(std::string("--bodies=").size());
+                continue;
+            }
+            if (arg == "--trajectory" && i + 1 < argc) {
+                trajectory_file = argv[++i];
+                continue;
+            }
+            if (arg.rfind("--trajectory=", 0) == 0) {
+                trajectory_file = arg.substr(std::string("--trajectory=").size());
+                continue;
+            }
+            if (arg == "--trajectory-format" && i + 1 < argc) {
+                trajectory_format = parseTrajectoryFormat(argv[++i]);
+                continue;
+            }
+            if (arg.rfind("--trajectory-format=", 0) == 0) {
+                trajectory_format = parseTrajectoryFormat(arg.substr(std::string("--trajectory-format=").size()));
                 continue;
             }
 
@@ -211,6 +241,10 @@ int main(int argc, char** argv) {
     if (!body_file.empty()) {
         std::cout << "Body configuration: " << body_file << std::endl;
     }
+    if (!trajectory_file.empty()) {
+        std::cout << "Trajectory output: " << trajectory_file << std::endl;
+        std::cout << "Trajectory format: " << trajectoryFormatToString(trajectory_format) << std::endl;
+    }
 
     std::vector<Body> bodies;
     try {
@@ -231,7 +265,7 @@ int main(int argc, char** argv) {
     std::cout << "Starting simulation..." << std::endl;
     
     // Run simulation
-    PerformanceMetrics metrics = simulation.run();
+    PerformanceMetrics metrics = simulation.run(trajectory_file, trajectory_format);
 
     // Output results
     std::cout << "\nResults:" << std::endl;

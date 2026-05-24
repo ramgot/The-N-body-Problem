@@ -64,6 +64,8 @@ CSV_HEADERS = [
     "compute_units",
     "device_type",
     "device_name",
+    "trajectory_file",
+    "trajectory_format",
     "command",
 ]
 
@@ -100,6 +102,8 @@ DEFAULT_BENCHMARK_CONFIG = {
     "device": "auto",
     "results_csv": str(CSV_PATH),
     "plots_dir": str(PLOTS_DIR),
+    "trajectory_dir": None,
+    "trajectory_format": "csv",
     "use_default_skips": True,
 }
 
@@ -147,6 +151,12 @@ def normalize_benchmark_config(raw_config=None):
     config["body_file"] = str(config["body_file"]) if config.get("body_file") else None
     config["results_csv"] = str(config.get("results_csv") or CSV_PATH)
     config["plots_dir"] = str(config.get("plots_dir") or PLOTS_DIR)
+    config["trajectory_dir"] = str(config["trajectory_dir"]) if config.get("trajectory_dir") else None
+    config["trajectory_format"] = (config.get("trajectory_format") or "csv").lower()
+    if config["trajectory_format"] not in {"csv", "binary", "bin"}:
+        raise ValueError("Trajectory format must be csv or binary")
+    if config["trajectory_format"] == "bin":
+        config["trajectory_format"] = "binary"
     config["use_default_skips"] = bool(config.get("use_default_skips", True))
     return config
 
@@ -173,6 +183,16 @@ def scenario_display_name(n_bodies, scenario, body_file=None):
         "random": f"Random test ({n_bodies} bodies)",
     }
     return labels.get(scenario, scenario)
+
+
+def benchmark_trajectory_path(trajectory_dir, method, n_bodies, t_hours, trajectory_format="csv"):
+    if not trajectory_dir:
+        return None
+    t_label = str(t_hours).replace(".", "p")
+    extension = "bin" if trajectory_format == "binary" else "csv"
+    output_dir = Path(trajectory_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir / f"{method}_n{n_bodies}_t{t_label}h.{extension}"
 
 
 def scenario_label(n):
@@ -264,6 +284,8 @@ def run_simulation(
     body_file: str | None = None,
     openmp_threads: int | None = None,
     use_default_skips: bool = True,
+    trajectory_dir: str | None = None,
+    trajectory_format: str = "csv",
 ):
     if method not in METHODS:
         raise ValueError(f"Unknown benchmark method: {method}")
@@ -293,6 +315,16 @@ def run_simulation(
         command.extend(["--bodies", str(body_file)])
     if method == "sycl":
         command.extend(["--device", device_choice])
+    trajectory_file = benchmark_trajectory_path(
+        trajectory_dir,
+        method,
+        n_bodies,
+        t_hours,
+        trajectory_format,
+    )
+    if trajectory_file is not None:
+        command.extend(["--trajectory", str(trajectory_file)])
+        command.extend(["--trajectory-format", trajectory_format])
 
     print(f"Running {method} | N={n_bodies} | T={t_hours}h | cmd={command}", flush=True)
     env = load_oneapi_env() if method == "sycl" else None
@@ -347,6 +379,8 @@ def run_simulation(
         "compute_units": metrics.get("compute_units", 0),
         "device_type": metrics.get("device_type", ""),
         "device_name": metrics.get("device_name", ""),
+        "trajectory_file": str(trajectory_file or ""),
+        "trajectory_format": trajectory_format if trajectory_file is not None else "",
         "command": " ".join(command),
     })
     return metrics
@@ -355,13 +389,19 @@ def run_simulation(
 def save_results(rows, csv_path=CSV_PATH):
     csv_path = Path(csv_path)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    write_header = not csv_path.exists()
+    write_header = not csv_path.exists() or csv_path.stat().st_size == 0
+    fieldnames = CSV_HEADERS
+    if not write_header:
+        with csv_path.open("r", newline="", encoding="utf-8") as csvfile:
+            existing_header = next(csv.reader(csvfile), None)
+            if existing_header:
+                fieldnames = existing_header
     with csv_path.open("a", newline="", encoding="utf-8") as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=CSV_HEADERS)
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         if write_header:
             writer.writeheader()
         for row in rows:
-            writer.writerow({k: row.get(k, "") for k in CSV_HEADERS})
+            writer.writerow({k: row.get(k, "") for k in fieldnames})
     print(f"Saved {len(rows)} rows to {csv_path}")
 
 
@@ -600,6 +640,12 @@ def main():
     parser.add_argument("--openmp-threads", type=int, help="OpenMP thread count")
     parser.add_argument("--results-csv", help="Where to write/read benchmark CSV results")
     parser.add_argument("--plots-dir", help="Directory for generated plots")
+    parser.add_argument("--trajectory-dir", help="Directory for per-run trajectory files")
+    parser.add_argument(
+        "--trajectory-format",
+        choices=["csv", "binary", "bin"],
+        help="Trajectory file format for --trajectory-dir",
+    )
     parser.add_argument("--no-default-skips", action="store_true", help="Do not skip known slow default cases")
     parser.add_argument(
         "--device",
@@ -632,6 +678,10 @@ def main():
         config["results_csv"] = args.results_csv
     if args.plots_dir:
         config["plots_dir"] = args.plots_dir
+    if args.trajectory_dir:
+        config["trajectory_dir"] = args.trajectory_dir
+    if args.trajectory_format:
+        config["trajectory_format"] = args.trajectory_format
     if args.device is not None:
         config["device"] = args.device
     if args.no_default_skips:
@@ -666,6 +716,8 @@ def main():
                             body_file=config["body_file"],
                             openmp_threads=config["openmp_threads"],
                             use_default_skips=config["use_default_skips"],
+                            trajectory_dir=config["trajectory_dir"],
+                            trajectory_format=config["trajectory_format"],
                         )
                         if row is not None:
                             benchmark_rows.append(row)

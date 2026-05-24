@@ -112,6 +112,9 @@ class NBodyGui:
         self.sim_threads = tk.StringVar(value=cpu_count)
         self.sim_device = tk.StringVar(value="auto")
         self.sim_csv = tk.StringVar(value=str(RESULTS_DIR / "single_runs.csv"))
+        self.sim_write_trajectory = tk.BooleanVar(value=False)
+        self.sim_trajectory = tk.StringVar(value=str(RESULTS_DIR / "trajectory.csv"))
+        self.sim_trajectory_format = tk.StringVar(value="csv")
 
         self.method_vars = {
             "serial": tk.BooleanVar(value=True),
@@ -127,6 +130,9 @@ class NBodyGui:
         self.bench_device = tk.StringVar(value="auto")
         self.bench_csv = tk.StringVar(value=str(RESULTS_DIR / "benchmark_results.csv"))
         self.bench_plots = tk.StringVar(value=str(RESULTS_DIR / "plots"))
+        self.bench_write_trajectory = tk.BooleanVar(value=False)
+        self.bench_trajectory = tk.StringVar(value=str(RESULTS_DIR / "trajectories"))
+        self.bench_trajectory_format = tk.StringVar(value="csv")
         self.bench_force = tk.BooleanVar(value=True)
         self.bench_make_plots = tk.BooleanVar(value=True)
         self.bench_default_skips = tk.BooleanVar(value=True)
@@ -204,6 +210,23 @@ class NBodyGui:
         )).grid(row=row, column=3, sticky="ew", padx=(8, 0), pady=4)
 
         row += 1
+        ttk.Checkbutton(parent, text="Записывать шаги",
+                        variable=self.sim_write_trajectory).grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Entry(parent, textvariable=self.sim_trajectory).grid(row=row, column=1, columnspan=2,
+                                                                 sticky="ew", pady=4)
+        ttk.Button(parent, text="Сохранить как", command=lambda: self._pick_save_file(
+            self.sim_trajectory,
+            self._trajectory_filetypes(self.sim_trajectory_format.get()),
+            self._trajectory_extension(self.sim_trajectory_format.get()),
+        )).grid(row=row, column=3, sticky="ew", padx=(8, 0), pady=4)
+
+        row += 1
+        ttk.Label(parent, text="Формат шагов").grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Combobox(parent, textvariable=self.sim_trajectory_format,
+                     values=["csv", "binary"], state="readonly", width=16).grid(
+            row=row, column=1, sticky="ew", pady=4)
+
+        row += 1
         button_frame = ttk.Frame(parent)
         button_frame.grid(row=row, column=0, columnspan=4, sticky="ew", pady=(14, 0))
         ttk.Button(button_frame, text="Собрать выбранный метод",
@@ -265,6 +288,20 @@ class NBodyGui:
                                                               sticky="ew", pady=4)
         ttk.Button(parent, text="Выбрать", command=lambda: self._pick_directory(self.bench_plots)).grid(
             row=row, column=3, sticky="ew", padx=(8, 0), pady=4)
+
+        row += 1
+        ttk.Checkbutton(parent, text="Записывать шаги",
+                        variable=self.bench_write_trajectory).grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Entry(parent, textvariable=self.bench_trajectory).grid(row=row, column=1, columnspan=2,
+                                                                   sticky="ew", pady=4)
+        ttk.Button(parent, text="Выбрать", command=lambda: self._pick_directory(self.bench_trajectory)).grid(
+            row=row, column=3, sticky="ew", padx=(8, 0), pady=4)
+
+        row += 1
+        ttk.Label(parent, text="Формат шагов").grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Combobox(parent, textvariable=self.bench_trajectory_format,
+                     values=["csv", "binary"], state="readonly", width=16).grid(
+            row=row, column=1, sticky="ew", pady=4)
 
         row += 1
         options = ttk.Frame(parent)
@@ -350,8 +387,12 @@ class NBodyGui:
         if path:
             variable.set(path)
 
-    def _pick_save_file(self, variable, filetypes):
-        path = filedialog.asksaveasfilename(initialdir=str(ROOT), filetypes=filetypes)
+    def _pick_save_file(self, variable, filetypes, defaultextension=None):
+        path = filedialog.asksaveasfilename(
+            initialdir=str(ROOT),
+            filetypes=filetypes,
+            defaultextension=defaultextension,
+        )
         if path:
             variable.set(path)
 
@@ -359,6 +400,26 @@ class NBodyGui:
         path = filedialog.askdirectory(initialdir=str(ROOT))
         if path:
             variable.set(path)
+
+    def _trajectory_extension(self, trajectory_format):
+        return ".bin" if trajectory_format == "binary" else ".csv"
+
+    def _trajectory_filetypes(self, trajectory_format):
+        if trajectory_format == "binary":
+            return [("Binary trajectory", "*.bin"), ("CSV", "*.csv"), ("All files", "*.*")]
+        return [("CSV", "*.csv"), ("Binary trajectory", "*.bin"), ("All files", "*.*")]
+
+    def _default_trajectory_file(self, trajectory_format):
+        return RESULTS_DIR / f"trajectory{self._trajectory_extension(trajectory_format)}"
+
+    def _single_trajectory_path(self, trajectory_format):
+        path = self.sim_trajectory.get().strip()
+        default_csv = str(self._default_trajectory_file("csv"))
+        default_bin = str(self._default_trajectory_file("binary"))
+        if not path or path in {default_csv, default_bin}:
+            path = str(self._default_trajectory_file(trajectory_format))
+            self.sim_trajectory.set(path)
+        return path
 
     def _append_log(self, text):
         chunks = str(text).split("\r")
@@ -536,6 +597,8 @@ class NBodyGui:
             t_hours = self._float_value(self.sim_t_hours, "T")
             threads = self._int_value(self.sim_threads, "OpenMP threads")
             scenario, body_file = self._scenario_and_body_file(self.sim_scenario, self.sim_body_file)
+            trajectory_format = self.sim_trajectory_format.get()
+            trajectory_file = self._single_trajectory_path(trajectory_format) if self.sim_write_trajectory.get() else ""
         except ValueError as exc:
             messagebox.showerror("Ошибка параметров", str(exc))
             return
@@ -553,18 +616,22 @@ class NBodyGui:
             command.extend(["--bodies", body_file])
         if method == "sycl":
             command.extend(["--device", self.sim_device.get()])
+        if trajectory_file:
+            command.extend(["--trajectory", trajectory_file])
+            command.extend(["--trajectory-format", trajectory_format])
 
         env_factory = benchmark.load_oneapi_env if method == "sycl" else None
         self._run_process(
             command,
             env_factory=env_factory,
             callback=lambda returncode, output: self._save_single_run(
-                returncode, output, method, n_bodies, dt_s, t_hours, threads, scenario, body_file, command
+                returncode, output, method, n_bodies, dt_s, t_hours, threads,
+                scenario, body_file, trajectory_file, trajectory_format, command
             ),
         )
 
     def _save_single_run(self, returncode, output, method, n_bodies, dt_s, t_hours,
-                         threads, scenario, body_file, command):
+                         threads, scenario, body_file, trajectory_file, trajectory_format, command):
         if returncode != 0:
             return
         csv_path = self.sim_csv.get().strip()
@@ -597,6 +664,8 @@ class NBodyGui:
                 "compute_units": metrics.get("compute_units", 0),
                 "device_type": metrics.get("device_type", ""),
                 "device_name": metrics.get("device_name", ""),
+                "trajectory_file": trajectory_file,
+                "trajectory_format": trajectory_format if trajectory_file else "",
                 "command": " ".join(str(part) for part in command),
             }
             benchmark.save_results([row], csv_path)
@@ -629,6 +698,8 @@ class NBodyGui:
             "device": self.bench_device.get(),
             "results_csv": self.bench_csv.get().strip(),
             "plots_dir": self.bench_plots.get().strip(),
+            "trajectory_dir": self.bench_trajectory.get().strip() if self.bench_write_trajectory.get() else None,
+            "trajectory_format": self.bench_trajectory_format.get(),
             "use_default_skips": self.bench_default_skips.get(),
         }
         return benchmark.normalize_benchmark_config(config)
@@ -700,6 +771,10 @@ class NBodyGui:
             self.bench_device.set(config["device"])
             self.bench_csv.set(config["results_csv"])
             self.bench_plots.set(config["plots_dir"])
+            self.bench_write_trajectory.set(bool(config.get("trajectory_dir")))
+            self.bench_trajectory_format.set(config.get("trajectory_format", "csv"))
+            if config.get("trajectory_dir"):
+                self.bench_trajectory.set(config["trajectory_dir"])
             self.bench_default_skips.set(config["use_default_skips"])
             if config.get("body_file"):
                 self.bench_scenario.set("body-file")

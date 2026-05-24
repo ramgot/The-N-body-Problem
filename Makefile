@@ -136,7 +136,7 @@ $(SYCL_OBJ_DIR)/Vector3.o: $(COMMON_DIR)/src/Vector3.cpp $(COMMON_DIR)/include/v
 # N-BODY SERIAL VERSION
 # ============================================================================
 
-$(NBODY_SERIAL_OBJ): $(NBODY_SERIAL_SRC) | setup
+$(NBODY_SERIAL_OBJ): $(NBODY_SERIAL_SRC) $(COMMON_DIR)/include/trajectory_writer.h | setup
 	$(CXX) $(CXXFLAGS) $(NBODY_INCLUDE) -c $< -o $@
 
 $(NBODY_SERIAL_EXE): $(NBODY_SERIAL_OBJ) $(COMMON_OBJS)
@@ -147,7 +147,7 @@ $(NBODY_SERIAL_EXE): $(NBODY_SERIAL_OBJ) $(COMMON_OBJS)
 # N-BODY OPENMP VERSION
 # ============================================================================
 
-$(NBODY_OMP_OBJ): $(NBODY_OMP_SRC) | setup
+$(NBODY_OMP_OBJ): $(NBODY_OMP_SRC) $(COMMON_DIR)/include/trajectory_writer.h | setup
 	$(CXX) $(CXXFLAGS_OMP) $(NBODY_INCLUDE) -c $< -o $@
 
 $(NBODY_OMP_EXE): $(NBODY_OMP_OBJ) $(COMMON_OBJS)
@@ -158,7 +158,7 @@ $(NBODY_OMP_EXE): $(NBODY_OMP_OBJ) $(COMMON_OBJS)
 # N-BODY SYCL VERSION - ADAPTIVECPP
 # ============================================================================
 
-$(NBODY_SYCL_OBJ): $(NBODY_SYCL_SRC) | setup
+$(NBODY_SYCL_OBJ): $(NBODY_SYCL_SRC) $(COMMON_DIR)/include/trajectory_writer.h | setup
 	@$(ACPP_CHECK); $(CXX_SYCL) $(ACPP_FLAGS) $(CXXFLAGS_SYCL) $(NBODY_INCLUDE) -c $< -o $@
 
 $(NBODY_SYCL_EXE): $(NBODY_SYCL_OBJ) $(COMMON_SYCL_OBJS)
