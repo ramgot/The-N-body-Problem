@@ -65,6 +65,7 @@ CSV_HEADERS = [
     "device_type",
     "device_name",
     "trajectory_file",
+    "trajectory_format",
     "command",
 ]
 
@@ -102,6 +103,7 @@ DEFAULT_BENCHMARK_CONFIG = {
     "results_csv": str(CSV_PATH),
     "plots_dir": str(PLOTS_DIR),
     "trajectory_dir": None,
+    "trajectory_format": "csv",
     "use_default_skips": True,
 }
 
@@ -150,6 +152,11 @@ def normalize_benchmark_config(raw_config=None):
     config["results_csv"] = str(config.get("results_csv") or CSV_PATH)
     config["plots_dir"] = str(config.get("plots_dir") or PLOTS_DIR)
     config["trajectory_dir"] = str(config["trajectory_dir"]) if config.get("trajectory_dir") else None
+    config["trajectory_format"] = (config.get("trajectory_format") or "csv").lower()
+    if config["trajectory_format"] not in {"csv", "binary", "bin"}:
+        raise ValueError("Trajectory format must be csv or binary")
+    if config["trajectory_format"] == "bin":
+        config["trajectory_format"] = "binary"
     config["use_default_skips"] = bool(config.get("use_default_skips", True))
     return config
 
@@ -178,13 +185,14 @@ def scenario_display_name(n_bodies, scenario, body_file=None):
     return labels.get(scenario, scenario)
 
 
-def benchmark_trajectory_path(trajectory_dir, method, n_bodies, t_hours):
+def benchmark_trajectory_path(trajectory_dir, method, n_bodies, t_hours, trajectory_format="csv"):
     if not trajectory_dir:
         return None
     t_label = str(t_hours).replace(".", "p")
+    extension = "bin" if trajectory_format == "binary" else "csv"
     output_dir = Path(trajectory_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    return output_dir / f"{method}_n{n_bodies}_t{t_label}h.csv"
+    return output_dir / f"{method}_n{n_bodies}_t{t_label}h.{extension}"
 
 
 def scenario_label(n):
@@ -277,6 +285,7 @@ def run_simulation(
     openmp_threads: int | None = None,
     use_default_skips: bool = True,
     trajectory_dir: str | None = None,
+    trajectory_format: str = "csv",
 ):
     if method not in METHODS:
         raise ValueError(f"Unknown benchmark method: {method}")
@@ -306,9 +315,16 @@ def run_simulation(
         command.extend(["--bodies", str(body_file)])
     if method == "sycl":
         command.extend(["--device", device_choice])
-    trajectory_file = benchmark_trajectory_path(trajectory_dir, method, n_bodies, t_hours)
+    trajectory_file = benchmark_trajectory_path(
+        trajectory_dir,
+        method,
+        n_bodies,
+        t_hours,
+        trajectory_format,
+    )
     if trajectory_file is not None:
         command.extend(["--trajectory", str(trajectory_file)])
+        command.extend(["--trajectory-format", trajectory_format])
 
     print(f"Running {method} | N={n_bodies} | T={t_hours}h | cmd={command}", flush=True)
     env = load_oneapi_env() if method == "sycl" else None
@@ -364,6 +380,7 @@ def run_simulation(
         "device_type": metrics.get("device_type", ""),
         "device_name": metrics.get("device_name", ""),
         "trajectory_file": str(trajectory_file or ""),
+        "trajectory_format": trajectory_format if trajectory_file is not None else "",
         "command": " ".join(command),
     })
     return metrics
@@ -623,7 +640,12 @@ def main():
     parser.add_argument("--openmp-threads", type=int, help="OpenMP thread count")
     parser.add_argument("--results-csv", help="Where to write/read benchmark CSV results")
     parser.add_argument("--plots-dir", help="Directory for generated plots")
-    parser.add_argument("--trajectory-dir", help="Directory for per-run trajectory CSV files")
+    parser.add_argument("--trajectory-dir", help="Directory for per-run trajectory files")
+    parser.add_argument(
+        "--trajectory-format",
+        choices=["csv", "binary", "bin"],
+        help="Trajectory file format for --trajectory-dir",
+    )
     parser.add_argument("--no-default-skips", action="store_true", help="Do not skip known slow default cases")
     parser.add_argument(
         "--device",
@@ -658,6 +680,8 @@ def main():
         config["plots_dir"] = args.plots_dir
     if args.trajectory_dir:
         config["trajectory_dir"] = args.trajectory_dir
+    if args.trajectory_format:
+        config["trajectory_format"] = args.trajectory_format
     if args.device is not None:
         config["device"] = args.device
     if args.no_default_skips:
@@ -693,6 +717,7 @@ def main():
                             openmp_threads=config["openmp_threads"],
                             use_default_skips=config["use_default_skips"],
                             trajectory_dir=config["trajectory_dir"],
+                            trajectory_format=config["trajectory_format"],
                         )
                         if row is not None:
                             benchmark_rows.append(row)

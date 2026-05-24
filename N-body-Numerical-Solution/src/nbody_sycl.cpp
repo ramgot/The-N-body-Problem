@@ -312,7 +312,8 @@ public:
     }
 
     PerformanceMetrics run(const std::string& trajectory_path = "",
-                           TrajectoryMode trajectory_mode = TrajectoryMode::Async) {
+                           TrajectoryMode trajectory_mode = TrajectoryMode::Async,
+                           TrajectoryFormat trajectory_format = TrajectoryFormat::Csv) {
         PerformanceMetrics metrics;
         size_t steps = static_cast<size_t>(t_max / dt);
 
@@ -326,7 +327,7 @@ public:
         SystemState initial_state(bodies, 0.0);
         initial_state.computeConservedQuantities();
 
-        TrajectoryWriter trajectory(trajectory_path);
+        TrajectoryWriter trajectory(trajectory_path, trajectory_format);
         const bool write_trajectory = trajectory.enabled();
         const size_t bytes = num_bodies * sizeof(double);
         std::vector<double> host_mass(num_bodies);
@@ -543,6 +544,7 @@ int main(int argc, char** argv){
         std::string body_file;
         std::string trajectory_file;
         TrajectoryMode trajectory_mode = TrajectoryMode::Async;
+        TrajectoryFormat trajectory_format = TrajectoryFormat::Csv;
 
         int positional = 0;
         for (int i = 1; i < argc; ++i) {
@@ -579,11 +581,20 @@ int main(int argc, char** argv){
                 trajectory_mode = parseTrajectoryMode(arg.substr(std::string("--trajectory-mode=").size()));
                 continue;
             }
+            if (arg == "--trajectory-format" && i + 1 < argc) {
+                trajectory_format = parseTrajectoryFormat(argv[++i]);
+                continue;
+            }
+            if (arg.rfind("--trajectory-format=", 0) == 0) {
+                trajectory_format = parseTrajectoryFormat(arg.substr(std::string("--trajectory-format=").size()));
+                continue;
+            }
             if (arg == "--help" || arg == "-h") {
                 std::cout << "Usage: " << argv[0]
                           << " [N] [dt] [t_max] [scenario] [--bodies path]"
                           << " [--device auto|cpu|gpu] [--trajectory path]"
                           << " [--trajectory-mode async|sync]"
+                          << " [--trajectory-format csv|binary]"
                           << std::endl;
                 return 0;
             }
@@ -613,11 +624,12 @@ int main(int argc, char** argv){
         }
         if (!trajectory_file.empty()) {
             std::cout << "Trajectory output: " << trajectory_file << std::endl;
+            std::cout << "Trajectory format: " << trajectoryFormatToString(trajectory_format) << std::endl;
             std::cout << "Trajectory mode: " << trajectoryModeToString(trajectory_mode) << std::endl;
             if (trajectory_mode == TrajectoryMode::Async) {
-                std::cout << "Trajectory writer: asynchronous host-side CSV writer" << std::endl;
+                std::cout << "Trajectory writer: asynchronous host-side trajectory writer" << std::endl;
             } else {
-                std::cout << "Trajectory writer: synchronous host-side CSV writer" << std::endl;
+                std::cout << "Trajectory writer: synchronous host-side trajectory writer" << std::endl;
             }
         }
 
@@ -629,7 +641,7 @@ int main(int argc, char** argv){
         }
 
         NBodySimulationSYCL simulation(bodies, dt, t_max, 1e3, device_choice);
-        PerformanceMetrics metrics = simulation.run(trajectory_file, trajectory_mode);
+        PerformanceMetrics metrics = simulation.run(trajectory_file, trajectory_mode, trajectory_format);
 
         std::cout << "\nResults:" << std::endl;
         std::cout << "--------" << std::endl;
