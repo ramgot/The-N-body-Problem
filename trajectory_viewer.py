@@ -336,6 +336,7 @@ class TrajectoryViewerFrame(BaseTrajectoryViewerFrame):
         self.after_id = None
         self.scatter = None
         self.trail_lines = []
+        self.body_colors = None
         self.axis_indices = (0, 1)
         self.unit_scale = 1.0
         self.unit_name = "m"
@@ -533,8 +534,7 @@ class TrajectoryViewerFrame(BaseTrajectoryViewerFrame):
         self.ax.set_aspect("equal", adjustable="box")
         self.ax.grid(True, alpha=0.25)
         self._update_projection_and_units()
-        x_axis, y_axis = self.axis_indices
-        positions = self.trajectory.positions[:, :, [x_axis, y_axis]] / self.unit_scale
+        positions = np.take(self.trajectory.positions, self.axis_indices, axis=2) / self.unit_scale
         finite_positions = positions[np.isfinite(positions)]
         if finite_positions.size:
             min_value = float(np.nanmin(positions))
@@ -550,26 +550,59 @@ class TrajectoryViewerFrame(BaseTrajectoryViewerFrame):
         self.ax.set_xlabel(f"{self.projection_var.get()[0]}, {self.unit_name}")
         self.ax.set_ylabel(f"{self.projection_var.get()[1]}, {self.unit_name}")
 
-        colors = np.linspace(0.0, 1.0, self.trajectory.sampled_bodies)
+        color_values = np.linspace(0.0, 1.0, self.trajectory.sampled_bodies)
+        color_map = matplotlib.colormaps.get_cmap("viridis")
+        self.body_colors = color_map(color_values)
         sizes = self._marker_sizes()
         first_frame = positions[0]
         self.scatter = self.ax.scatter(
             first_frame[:, 0],
             first_frame[:, 1],
             s=sizes,
-            c=colors,
-            cmap="viridis",
+            c=self.body_colors,
             alpha=0.9,
             edgecolors="none",
         )
 
         self.trail_lines = []
         trail_count = min(self.trajectory.sampled_bodies, 50)
+        labels = self._body_labels()
         for body_index in range(trail_count):
-            line, = self.ax.plot([], [], linewidth=0.8, alpha=0.45)
+            line, = self.ax.plot(
+                [],
+                [],
+                color=self.body_colors[body_index],
+                linewidth=0.9,
+                alpha=0.55,
+                label=labels[body_index] if body_index < len(labels) else f"Body {body_index}",
+            )
             self.trail_lines.append(line)
+        if 1 < self.trajectory.sampled_bodies <= 10:
+            self.ax.legend(loc="upper right", fontsize=8, framealpha=0.75)
 
         self.canvas.draw_idle()
+
+    def _body_labels(self) -> list[str]:
+        if self.trajectory is None:
+            return []
+        name = self.trajectory.path.name.lower()
+        normalized = name.replace("-", "_")
+        if self.trajectory.total_bodies == 3 and "sun_earth_moon" in normalized:
+            return ["Sun", "Earth", "Moon"]
+        if self.trajectory.total_bodies == 10 and "solar_system" in normalized:
+            return [
+                "Sun",
+                "Mercury",
+                "Venus",
+                "Earth",
+                "Mars",
+                "Jupiter",
+                "Saturn",
+                "Uranus",
+                "Neptune",
+                "Pluto",
+            ][: self.trajectory.sampled_bodies]
+        return [f"Body {index}" for index in range(self.trajectory.sampled_bodies)]
 
     def _marker_sizes(self) -> np.ndarray:
         bodies = self.trajectory.sampled_bodies
@@ -614,12 +647,14 @@ class TrajectoryViewerFrame(BaseTrajectoryViewerFrame):
             return
         frame_index = max(0, min(frame_index, self.trajectory.sampled_frames - 1))
         self.frame_index = frame_index
-        x_axis, y_axis = self.axis_indices
-        current = self.trajectory.positions[frame_index, :, [x_axis, y_axis]] / self.unit_scale
+        current = np.take(self.trajectory.positions[frame_index], self.axis_indices, axis=1) / self.unit_scale
         self.scatter.set_offsets(current)
 
         if self.trails_var.get():
-            history = self.trajectory.positions[: frame_index + 1, :, [x_axis, y_axis]] / self.unit_scale
+            history = (
+                np.take(self.trajectory.positions[: frame_index + 1], self.axis_indices, axis=2)
+                / self.unit_scale
+            )
             for body_index, line in enumerate(self.trail_lines):
                 line.set_data(history[:, body_index, 0], history[:, body_index, 1])
         else:
@@ -635,11 +670,16 @@ class TrajectoryViewerFrame(BaseTrajectoryViewerFrame):
     def _update_status(self):
         if self.trajectory is None:
             return
+        labels = self._body_labels()
+        label_hint = ""
+        if self.trajectory.total_bodies == 3 and labels[:3] == ["Sun", "Earth", "Moon"]:
+            label_hint = " · 0 Sun, 1 Earth, 2 Moon"
         self.status_var.set(
             f"{self.trajectory.path.name}: {self.trajectory.source_format}, "
             f"кадр {self.frame_index + 1}/{self.trajectory.sampled_frames} "
             f"(всего {self.trajectory.total_frames}), "
             f"тел {self.trajectory.sampled_bodies}/{self.trajectory.total_bodies}"
+            f"{label_hint}"
         )
 
     def _redraw(self):

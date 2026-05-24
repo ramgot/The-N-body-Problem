@@ -100,6 +100,8 @@ class NBodyGui:
         self.run_started_at = None
         self.active_command = ""
         self.status_after_id = None
+        self._updating_sim_trajectory = False
+        self.sim_trajectory_auto_path = True
 
         self._create_vars()
         self._build_ui()
@@ -119,6 +121,7 @@ class NBodyGui:
         self.sim_csv = tk.StringVar(value=str(RESULTS_DIR / "single_runs.csv"))
         self.sim_write_trajectory = tk.BooleanVar(value=False)
         self.sim_trajectory = tk.StringVar(value=str(RESULTS_DIR / "trajectory.csv"))
+        self.sim_trajectory.trace_add("write", self._on_sim_trajectory_changed)
         self.sim_trajectory_format = tk.StringVar(value="csv")
 
         self.method_vars = {
@@ -222,11 +225,8 @@ class NBodyGui:
                         variable=self.sim_write_trajectory).grid(row=row, column=0, sticky="w", pady=4)
         ttk.Entry(parent, textvariable=self.sim_trajectory).grid(row=row, column=1, columnspan=2,
                                                                  sticky="ew", pady=4)
-        ttk.Button(parent, text="Сохранить как", command=lambda: self._pick_save_file(
-            self.sim_trajectory,
-            self._trajectory_filetypes(self.sim_trajectory_format.get()),
-            self._trajectory_extension(self.sim_trajectory_format.get()),
-        )).grid(row=row, column=3, sticky="ew", padx=(8, 0), pady=4)
+        ttk.Button(parent, text="Сохранить как", command=self._pick_single_trajectory_file).grid(
+            row=row, column=3, sticky="ew", padx=(8, 0), pady=4)
 
         row += 1
         ttk.Label(parent, text="Формат шагов").grid(row=row, column=0, sticky="w", pady=4)
@@ -415,6 +415,16 @@ class NBodyGui:
         if path:
             variable.set(path)
 
+    def _pick_single_trajectory_file(self):
+        trajectory_format = self.sim_trajectory_format.get()
+        path = filedialog.asksaveasfilename(
+            initialdir=str(ROOT),
+            filetypes=self._trajectory_filetypes(trajectory_format),
+            defaultextension=self._trajectory_extension(trajectory_format),
+        )
+        if path:
+            self._set_sim_trajectory_path(path, auto=False)
+
     def _pick_directory(self, variable):
         path = filedialog.askdirectory(initialdir=str(ROOT))
         if path:
@@ -431,13 +441,50 @@ class NBodyGui:
     def _default_trajectory_file(self, trajectory_format):
         return RESULTS_DIR / f"trajectory{self._trajectory_extension(trajectory_format)}"
 
-    def _single_trajectory_path(self, trajectory_format):
+    def _on_sim_trajectory_changed(self, *_args):
+        if not self._updating_sim_trajectory:
+            self.sim_trajectory_auto_path = False
+
+    def _set_sim_trajectory_path(self, path, auto=None):
+        self._updating_sim_trajectory = True
+        try:
+            self.sim_trajectory.set(str(path))
+        finally:
+            self._updating_sim_trajectory = False
+        if auto is not None:
+            self.sim_trajectory_auto_path = auto
+
+    def _safe_filename_part(self, value):
+        cleaned = "".join(ch.lower() if ch.isalnum() else "_" for ch in str(value))
+        cleaned = "_".join(part for part in cleaned.split("_") if part)
+        return cleaned or "run"
+
+    def _resolved_single_scenario_name(self, n_bodies, scenario, body_file):
+        if body_file:
+            return Path(body_file).stem
+        if scenario == "auto":
+            return benchmark.SCENARIO_BY_N.get(n_bodies, "random")
+        return scenario
+
+    def _generated_single_trajectory_file(self, trajectory_format, method, n_bodies, t_hours, scenario, body_file):
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        scenario_name = self._safe_filename_part(
+            self._resolved_single_scenario_name(n_bodies, scenario, body_file)
+        )
+        t_part = self._safe_filename_part(f"{t_hours:g}h")
+        extension = self._trajectory_extension(trajectory_format)
+        filename = f"single_{method}_{scenario_name}_n{n_bodies}_t{t_part}_{timestamp}{extension}"
+        return RESULTS_DIR / "trajectories" / filename
+
+    def _single_trajectory_path(self, trajectory_format, method, n_bodies, t_hours, scenario, body_file):
         path = self.sim_trajectory.get().strip()
         default_csv = str(self._default_trajectory_file("csv"))
         default_bin = str(self._default_trajectory_file("binary"))
-        if not path or path in {default_csv, default_bin}:
-            path = str(self._default_trajectory_file(trajectory_format))
-            self.sim_trajectory.set(path)
+        if self.sim_trajectory_auto_path or not path or path in {default_csv, default_bin}:
+            path = str(self._generated_single_trajectory_file(
+                trajectory_format, method, n_bodies, t_hours, scenario, body_file
+            ))
+            self._set_sim_trajectory_path(path, auto=True)
         return path
 
     def _append_log(self, text):
@@ -617,7 +664,9 @@ class NBodyGui:
             threads = self._int_value(self.sim_threads, "OpenMP threads")
             scenario, body_file = self._scenario_and_body_file(self.sim_scenario, self.sim_body_file)
             trajectory_format = self.sim_trajectory_format.get()
-            trajectory_file = self._single_trajectory_path(trajectory_format) if self.sim_write_trajectory.get() else ""
+            trajectory_file = self._single_trajectory_path(
+                trajectory_format, method, n_bodies, t_hours, scenario, body_file
+            ) if self.sim_write_trajectory.get() else ""
         except ValueError as exc:
             messagebox.showerror("Ошибка параметров", str(exc))
             return
@@ -658,7 +707,7 @@ class NBodyGui:
             return
         try:
             metrics = benchmark.parse_metrics(output)
-            actual_n = count_body_rows(body_file) if body_file else n_bodies
+            actual_n = self._actual_body_count(n_bodies, scenario, body_file)
             reported_threads = metrics.get("threads", 0)
             if method == "serial":
                 reported_threads = 1
@@ -693,6 +742,16 @@ class NBodyGui:
                 self.trajectory_viewer.set_path(trajectory_file, trajectory_format)
         except Exception as exc:
             messagebox.showerror("CSV не сохранен", str(exc))
+
+    def _actual_body_count(self, n_bodies, scenario, body_file):
+        if body_file:
+            return count_body_rows(body_file)
+        resolved = benchmark.SCENARIO_BY_N.get(n_bodies, "random") if scenario == "auto" else scenario
+        if resolved == "sun-earth-moon":
+            return 3
+        if resolved == "solar-system":
+            return 10
+        return n_bodies
 
     def _benchmark_config_from_ui(self):
         methods = self._selected_benchmark_methods()
