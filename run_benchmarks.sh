@@ -25,6 +25,15 @@ FORCE=""
 PLOT_ONLY=""
 BUILD_SYCL=""
 DEVICE="auto"
+METHODS="serial,openmp"
+OUTPUT_DIR=""
+
+append_method() {
+    case ",$METHODS," in
+        *,"$1",*) ;;
+        *) METHODS="$METHODS,$1" ;;
+    esac
+}
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -38,6 +47,11 @@ while [[ $# -gt 0 ]]; do
             ;;
         --with-sycl)
             BUILD_SYCL="yes"
+            append_method "sycl"
+            shift
+            ;;
+        --with-two-body)
+            append_method "two-body"
             shift
             ;;
         --device)
@@ -52,21 +66,36 @@ while [[ $# -gt 0 ]]; do
             DEVICE="${1#*=}"
             shift
             ;;
+        --output-dir)
+            if [ -z "${2:-}" ]; then
+                echo -e "${RED}Error: --output-dir requires a directory path${NC}"
+                exit 1
+            fi
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        --output-dir=*)
+            OUTPUT_DIR="${1#*=}"
+            shift
+            ;;
         --help)
             echo "Usage: $0 [options]"
             echo ""
             echo "Options:"
-            echo "  --force      Force re-run benchmarks (overwrite existing results)"
-            echo "  --plot-only  Only generate plots from existing data"
-            echo "  --with-sycl  Include SYCL version in benchmarks"
-            echo "  --device DEV Select SYCL device: auto, cpu, or gpu"
-            echo "  --help       Show this help message"
+            echo "  --force          Force re-run benchmarks (overwrite existing results)"
+            echo "  --plot-only      Only generate plots from existing data"
+            echo "  --with-sycl      Include SYCL version in benchmarks"
+            echo "  --with-two-body  Include analytical two-body solver"
+            echo "  --device DEV     Select SYCL device: auto, cpu, or gpu"
+            echo "  --output-dir DIR Save this benchmark run to DIR"
+            echo "  --help           Show this help message"
             echo ""
             echo "Examples:"
             echo "  $0                    # Run full benchmark suite"
             echo "  $0 --force           # Force re-run all benchmarks"
             echo "  $0 --plot-only       # Generate plots only"
             echo "  $0 --with-sycl       # Include SYCL benchmarks"
+            echo "  $0 --with-two-body   # Include analytical two-body benchmark"
             echo "  $0 --with-sycl --device gpu"
             exit 0
             ;;
@@ -144,14 +173,17 @@ fi
 echo -e "${YELLOW}Running benchmarks...${NC}"
 
 if [ "$PLOT_ONLY" = "yes" ]; then
-    if [ ! -f "benchmark_results/benchmark_results.csv" ]; then
-        echo -e "${RED}Error: No benchmark data found. Run benchmarks first without --plot-only${NC}"
-        exit 1
-    fi
-    python3 benchmark.py --plot
+    BENCHMARK_ARGS=(--plot)
 else
-    python3 benchmark.py --run $FORCE --device "$DEVICE"
+    BENCHMARK_ARGS=(--run --device "$DEVICE" --methods "$METHODS")
+    if [ -n "$FORCE" ]; then
+        BENCHMARK_ARGS+=(--force)
+    fi
 fi
+if [ -n "$OUTPUT_DIR" ]; then
+    BENCHMARK_ARGS+=(--output-dir "$OUTPUT_DIR")
+fi
+python3 benchmark.py "${BENCHMARK_ARGS[@]}"
 
 if [ $? -ne 0 ]; then
     echo -e "${RED}Benchmarking failed!${NC}"
@@ -167,18 +199,29 @@ echo "Benchmark Results Summary"
 echo "========================================"
 
 if [ -d "benchmark_results" ]; then
-    echo "Results saved to: benchmark_results/"
-    echo "CSV data: benchmark_results/benchmark_results.csv"
-    echo "Plots: benchmark_results/plots/"
+    LATEST_RUN="$(python3 - <<'PY'
+from pathlib import Path
+latest = Path("benchmark_results/latest_run.txt")
+if latest.exists():
+    value = latest.read_text(encoding="utf-8").strip()
+    if value:
+        print(value)
+        raise SystemExit
+print("benchmark_results")
+PY
+)"
+    echo "Results saved to: $LATEST_RUN/"
+    echo "CSV data: $LATEST_RUN/benchmark_results.csv"
+    echo "Plots: $LATEST_RUN/plots/"
 
     # Show summary of results
-    if [ -f "benchmark_results/benchmark_results.csv" ]; then
+    if [ -f "$LATEST_RUN/benchmark_results.csv" ]; then
         echo ""
         echo "Quick summary:"
-        python3 -c "
+        CSV_PATH="$LATEST_RUN/benchmark_results.csv" python3 -c "
 import csv
 import os
-csv_path = 'benchmark_results/benchmark_results.csv'
+csv_path = os.environ['CSV_PATH']
 if os.path.exists(csv_path):
     with open(csv_path, 'r') as f:
         reader = csv.DictReader(f)
@@ -198,4 +241,4 @@ else
 fi
 
 echo ""
-echo -e "${GREEN}All done! Check benchmark_results/ for detailed results.${NC}"
+echo -e "${GREEN}All done! Check the benchmark run directory for detailed results.${NC}"

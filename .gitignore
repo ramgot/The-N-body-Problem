@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+
+obj/
+build/
+nbody_serial
+nbody_openmp
+nbody_sycl
+two_body_solver
+
+benchmark_results/

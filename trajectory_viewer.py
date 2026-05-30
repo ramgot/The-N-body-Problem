@@ -11,6 +11,7 @@ import os
 import queue
 import struct
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -47,6 +48,7 @@ BINARY_FRAME_MAGIC = b"FRAME001"
 BINARY_HEADER_STRUCT = struct.Struct("<16sIIIII")
 BINARY_FRAME_STRUCT = struct.Struct("<8sQdQ")
 BINARY_ARRAY_NAMES = ("mass", "x", "y", "z", "vx", "vy", "vz", "ax", "ay", "az")
+PLAYBACK_FPS = 30.0
 
 
 @dataclass
@@ -334,6 +336,8 @@ class TrajectoryViewerFrame(BaseTrajectoryViewerFrame):
         self.frame_index = 0
         self.playing = False
         self.after_id = None
+        self.next_frame_at = None
+        self.updating_frame_scale = False
         self.scatter = None
         self.trail_lines = []
         self.body_colors = None
@@ -347,7 +351,7 @@ class TrajectoryViewerFrame(BaseTrajectoryViewerFrame):
         self.unit_var = tk.StringVar(value="auto")
         self.max_frames_var = tk.StringVar(value=str(initial_max_frames))
         self.max_bodies_var = tk.StringVar(value=str(initial_max_bodies))
-        self.speed_var = tk.StringVar(value="30")
+        self.loaded_bodies_var = tk.StringVar(value="Тела: -")
         self.trails_var = tk.BooleanVar(value=True)
         self.frame_var = tk.IntVar(value=0)
         self.status_var = tk.StringVar(value="Траектория не загружена")
@@ -405,10 +409,11 @@ class TrajectoryViewerFrame(BaseTrajectoryViewerFrame):
             state="readonly",
             width=7,
         ).pack(side="left", padx=(6, 14))
-        ttk.Label(options, text="Кадры").pack(side="left")
+        ttk.Label(options, text="Лимит кадров").pack(side="left")
         ttk.Entry(options, textvariable=self.max_frames_var, width=7).pack(side="left", padx=(6, 14))
-        ttk.Label(options, text="Тела").pack(side="left")
+        ttk.Label(options, text="Лимит тел").pack(side="left")
         ttk.Entry(options, textvariable=self.max_bodies_var, width=7).pack(side="left", padx=(6, 14))
+        ttk.Label(options, textvariable=self.loaded_bodies_var).pack(side="left", padx=(0, 14))
         ttk.Checkbutton(options, text="Следы", variable=self.trails_var, command=self._redraw).pack(side="left")
 
         figure = Figure(figsize=(7, 5), dpi=100)
@@ -447,8 +452,6 @@ class TrajectoryViewerFrame(BaseTrajectoryViewerFrame):
         self.frame_scale.grid(row=0, column=3, sticky="ew", padx=8)
         ttk.Button(playback, text=">", width=4, command=self._next_frame).grid(row=0, column=4)
         ttk.Button(playback, text=">|", width=4, command=self._last_frame).grid(row=0, column=5, padx=(4, 0))
-        ttk.Label(playback, text="FPS").grid(row=0, column=6, padx=(14, 4))
-        ttk.Entry(playback, textvariable=self.speed_var, width=5).grid(row=0, column=7)
 
         ttk.Label(self, textvariable=self.status_var).grid(row=3, column=0, sticky="ew", pady=(6, 0))
 
@@ -514,6 +517,7 @@ class TrajectoryViewerFrame(BaseTrajectoryViewerFrame):
                     self._set_trajectory(payload)
                 elif kind == "error":
                     self.status_var.set("Траектория не загружена")
+                    self.loaded_bodies_var.set("Тела: -")
                     messagebox.showerror("Ошибка загрузки", str(payload))
         except queue.Empty:
             pass
@@ -674,6 +678,12 @@ class TrajectoryViewerFrame(BaseTrajectoryViewerFrame):
         label_hint = ""
         if self.trajectory.total_bodies == 3 and labels[:3] == ["Sun", "Earth", "Moon"]:
             label_hint = " · 0 Sun, 1 Earth, 2 Moon"
+        if self.trajectory.sampled_bodies == self.trajectory.total_bodies:
+            self.loaded_bodies_var.set(f"Тела: {self.trajectory.total_bodies}")
+        else:
+            self.loaded_bodies_var.set(
+                f"Тела: {self.trajectory.sampled_bodies}/{self.trajectory.total_bodies}"
+            )
         self.status_var.set(
             f"{self.trajectory.path.name}: {self.trajectory.source_format}, "
             f"кадр {self.frame_index + 1}/{self.trajectory.sampled_frames} "
@@ -689,7 +699,7 @@ class TrajectoryViewerFrame(BaseTrajectoryViewerFrame):
         self._draw_frame(self.frame_index)
 
     def _on_scale(self, value):
-        if self.trajectory is None:
+        if self.trajectory is None or self.updating_frame_scale:
             return
         self._draw_frame(int(float(value)))
 
@@ -697,7 +707,11 @@ class TrajectoryViewerFrame(BaseTrajectoryViewerFrame):
         if self.trajectory is None:
             return
         frame_index = max(0, min(frame_index, self.trajectory.sampled_frames - 1))
-        self.frame_var.set(frame_index)
+        self.updating_frame_scale = True
+        try:
+            self.frame_var.set(frame_index)
+        finally:
+            self.updating_frame_scale = False
         self._draw_frame(frame_index)
 
     def _first_frame(self):
@@ -725,26 +739,30 @@ class TrajectoryViewerFrame(BaseTrajectoryViewerFrame):
             self._stop_playback()
         else:
             self.playing = True
+            self.next_frame_at = None
             self.play_button_text.set("Пауза")
-            self._schedule_next_frame()
+            self._schedule_next_frame(reset_deadline=True)
 
     def _stop_playback(self):
         self.playing = False
         self.play_button_text.set("Пуск")
+        self.next_frame_at = None
         if self.after_id is not None:
             self.after_cancel(self.after_id)
             self.after_id = None
 
-    def _schedule_next_frame(self):
+    def _frame_interval_s(self) -> float:
+        return 1.0 / PLAYBACK_FPS
+
+    def _schedule_next_frame(self, reset_deadline: bool = False):
         if not self.playing:
             return
-        try:
-            fps = float(self.speed_var.get())
-        except ValueError:
-            fps = 30.0
-        fps = min(max(fps, 1.0), 120.0)
-        interval_ms = max(1, int(1000.0 / fps))
-        self.after_id = self.after(interval_ms, self._playback_step)
+        interval_s = self._frame_interval_s()
+        now = time.perf_counter()
+        if reset_deadline or self.next_frame_at is None:
+            self.next_frame_at = now + interval_s
+        delay_ms = max(1, int((self.next_frame_at - now) * 1000.0))
+        self.after_id = self.after(delay_ms, self._playback_step)
 
     def _playback_step(self):
         self.after_id = None
@@ -753,6 +771,9 @@ class TrajectoryViewerFrame(BaseTrajectoryViewerFrame):
         if self.frame_index >= self.trajectory.sampled_frames - 1:
             self._stop_playback()
             return
+        if self.next_frame_at is None:
+            self.next_frame_at = time.perf_counter()
+        self.next_frame_at += self._frame_interval_s()
         self._next_frame()
         self._schedule_next_frame()
 
