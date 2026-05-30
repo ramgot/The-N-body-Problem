@@ -68,13 +68,15 @@ COMMON_SRCS = $(COMMON_DIR)/src/body.cpp $(COMMON_DIR)/src/Vector3.cpp
 NBODY_SERIAL_SRC = $(NBODY_DIR)/src/nbody_serial.cpp
 NBODY_OMP_SRC = $(NBODY_DIR)/src/nbody_openmp.cpp
 NBODY_SYCL_SRC = $(NBODY_DIR)/src/nbody_sycl.cpp
-TWOBODY_SRCS = $(TWOBODY_DIR)/src/two_body_solver.cpp $(TWOBODY_DIR)/src/test_main.cpp
+TWOBODY_SOLVER_SRC = $(TWOBODY_DIR)/src/two_body_solver.cpp
+TWOBODY_MAIN_SRC = $(TWOBODY_DIR)/src/two_body_main.cpp
 
 # Object files for host-only builds
 COMMON_OBJS = $(addprefix $(OBJ_DIR)/, $(notdir $(COMMON_SRCS:.cpp=.o)))
 NBODY_SERIAL_OBJ = $(OBJ_DIR)/nbody_serial.o
 NBODY_OMP_OBJ = $(OBJ_DIR)/nbody_openmp.o
-TWOBODY_OBJS = $(addprefix $(OBJ_DIR)/, $(notdir $(TWOBODY_SRCS:.cpp=.o)))
+TWOBODY_SOLVER_OBJ = $(OBJ_DIR)/two_body_solver.o
+TWOBODY_MAIN_OBJ = $(OBJ_DIR)/two_body_main.o
 
 # Object files for SYCL build.
 # Keep them separate from g++ objects so the SYCL executable is compiled/linked
@@ -95,7 +97,7 @@ BUILD_MODE ?= Release
 # TARGETS
 # ============================================================================
 
-.PHONY: all all-sycl clean run run-serial run-openmp run-sycl run-twobody gui gui-bg help \
+.PHONY: all all-sycl clean run run-serial run-openmp run-sycl run-twobody gui gui-bg viewer visualize help \
 	check-compilers check-acpp print-acpp-config benchmark benchmark-full plots \
 	quick-benchmark quick-benchmark-sycl clean-benchmark clean-all setup obj
 
@@ -170,13 +172,13 @@ $(NBODY_SYCL_EXE): $(NBODY_SYCL_OBJ) $(COMMON_SYCL_OBJS)
 # TWO-BODY ANALYTICAL SOLUTION
 # ============================================================================
 
-$(OBJ_DIR)/two_body_solver.o: $(TWOBODY_DIR)/src/two_body_solver.cpp $(TWOBODY_DIR)/include/two_body_solver.h | setup
+$(TWOBODY_SOLVER_OBJ): $(TWOBODY_SOLVER_SRC) $(TWOBODY_DIR)/include/two_body_solver.h | setup
 	$(CXX) $(CXXFLAGS) $(TWOBODY_INCLUDE) -c $< -o $@
 
-$(OBJ_DIR)/test_main.o: $(TWOBODY_DIR)/src/test_main.cpp | setup
+$(TWOBODY_MAIN_OBJ): $(TWOBODY_MAIN_SRC) $(TWOBODY_DIR)/include/two_body_solver.h $(COMMON_DIR)/include/trajectory_writer.h | setup
 	$(CXX) $(CXXFLAGS) $(TWOBODY_INCLUDE) -c $< -o $@
 
-$(TWOBODY_EXE): $(OBJ_DIR)/two_body_solver.o $(OBJ_DIR)/test_main.o $(COMMON_OBJS)
+$(TWOBODY_EXE): $(TWOBODY_SOLVER_OBJ) $(TWOBODY_MAIN_OBJ) $(COMMON_OBJS)
 	$(CXX) $(CXXFLAGS) $(TWOBODY_INCLUDE) $^ -o $@
 	@echo "Built: $@"
 
@@ -253,6 +255,9 @@ gui-bg:
 	nohup python3 nbody_gui.py >/tmp/nbody_gui.log 2>&1 &
 	@echo "N-body GUI started in background. Log: /tmp/nbody_gui.log"
 
+viewer visualize:
+	python3 trajectory_viewer.py
+
 print-acpp-config:
 	@echo "CXX_SYCL       = $(CXX_SYCL)"
 	@echo "ACPP_HOME      = $(ACPP_HOME)"
@@ -290,6 +295,7 @@ help:
 	@echo "  run-twobody          - Build and run two-body solver"
 	@echo "  gui                  - Open the Tkinter launcher"
 	@echo "  gui-bg               - Open the launcher in background and return the terminal"
+	@echo "  viewer               - Open the trajectory viewer"
 	@echo "  benchmark            - Run benchmark suite and save results"
 	@echo "  benchmark-full       - Run benchmark suite and generate plots"
 	@echo "  plots                - Generate plots from existing benchmark data"

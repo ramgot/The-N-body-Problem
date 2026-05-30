@@ -30,6 +30,11 @@ except ImportError as exc:
 ROOT = Path(__file__).resolve().parent
 os.chdir(ROOT)
 
+if TKINTER_IMPORT_ERROR is None:
+    from trajectory_viewer import TrajectoryViewerFrame
+else:
+    TrajectoryViewerFrame = None
+
 import benchmark
 
 CONFIG_DIR = ROOT / "configs"
@@ -95,6 +100,8 @@ class NBodyGui:
         self.run_started_at = None
         self.active_command = ""
         self.status_after_id = None
+        self._updating_sim_trajectory = False
+        self.sim_trajectory_auto_path = True
 
         self._create_vars()
         self._build_ui()
@@ -114,12 +121,13 @@ class NBodyGui:
         self.sim_csv = tk.StringVar(value=str(RESULTS_DIR / "single_runs.csv"))
         self.sim_write_trajectory = tk.BooleanVar(value=False)
         self.sim_trajectory = tk.StringVar(value=str(RESULTS_DIR / "trajectory.csv"))
+        self.sim_trajectory.trace_add("write", self._on_sim_trajectory_changed)
         self.sim_trajectory_format = tk.StringVar(value="csv")
+        self.sim_trajectory_format.trace_add("write", self._on_sim_trajectory_format_changed)
 
         self.method_vars = {
-            "serial": tk.BooleanVar(value=True),
-            "openmp": tk.BooleanVar(value=True),
-            "sycl": tk.BooleanVar(value=False),
+            method: tk.BooleanVar(value=method in {"serial", "openmp"})
+            for method in benchmark.METHODS
         }
         self.bench_n_values = tk.StringVar(value="3,10,100,1000")
         self.bench_times = tk.StringVar(value="24,168,720,8760")
@@ -128,14 +136,14 @@ class NBodyGui:
         self.bench_body_file = tk.StringVar(value="")
         self.bench_threads = tk.StringVar(value=cpu_count)
         self.bench_device = tk.StringVar(value="auto")
-        self.bench_csv = tk.StringVar(value=str(RESULTS_DIR / "benchmark_results.csv"))
-        self.bench_plots = tk.StringVar(value=str(RESULTS_DIR / "plots"))
+        self.bench_output_dir = tk.StringVar(value="")
         self.bench_write_trajectory = tk.BooleanVar(value=False)
-        self.bench_trajectory = tk.StringVar(value=str(RESULTS_DIR / "trajectories"))
         self.bench_trajectory_format = tk.StringVar(value="csv")
         self.bench_force = tk.BooleanVar(value=True)
         self.bench_make_plots = tk.BooleanVar(value=True)
         self.bench_default_skips = tk.BooleanVar(value=True)
+        self.bench_monitor_resources = tk.BooleanVar(value=False)
+        self.bench_monitor_interval = tk.StringVar(value="0.5")
         self.status_text = tk.StringVar(value="Готово")
 
         self.gen_n = tk.StringVar(value="100")
@@ -155,73 +163,99 @@ class NBodyGui:
         sim_tab = ttk.Frame(notebook, padding=12)
         bench_tab = ttk.Frame(notebook, padding=12)
         config_tab = ttk.Frame(notebook, padding=12)
+        visualization_tab = ttk.Frame(notebook, padding=12)
         notebook.add(sim_tab, text="Симуляция")
         notebook.add(bench_tab, text="Бенчмарк")
         notebook.add(config_tab, text="Конфигурации тел")
+        notebook.add(visualization_tab, text="Визуализация")
 
         self._build_simulation_tab(sim_tab)
         self._build_benchmark_tab(bench_tab)
         self._build_config_tab(config_tab)
+        self._build_visualization_tab(visualization_tab)
         self._build_log()
+        self._bind_dynamic_ui()
+        self._refresh_dynamic_ui()
 
     def _build_simulation_tab(self, parent):
         parent.columnconfigure(1, weight=1)
         parent.columnconfigure(3, weight=1)
+        self.sim_rows = {}
 
         row = 0
-        ttk.Label(parent, text="Метод").grid(row=row, column=0, sticky="w", pady=4)
-        ttk.Combobox(parent, textvariable=self.sim_method, values=list(benchmark.METHODS),
-                     state="readonly", width=16).grid(row=row, column=1, sticky="ew", pady=4)
-        ttk.Label(parent, text="Сценарий").grid(row=row, column=2, sticky="w", padx=(16, 0), pady=4)
-        ttk.Combobox(parent, textvariable=self.sim_scenario,
-                     values=["auto", "random", "sun-earth-moon", "solar-system", "body-file"],
-                     state="readonly", width=20).grid(row=row, column=3, sticky="ew", pady=4)
+        method_label = ttk.Label(parent, text="Метод")
+        method_label.grid(row=row, column=0, sticky="w", pady=4)
+        self.sim_method_combo = ttk.Combobox(parent, textvariable=self.sim_method, values=list(benchmark.METHODS),
+                                             state="readonly", width=16)
+        self.sim_method_combo.grid(row=row, column=1, sticky="ew", pady=4)
+        scenario_label = ttk.Label(parent, text="Сценарий")
+        scenario_label.grid(row=row, column=2, sticky="w", padx=(16, 0), pady=4)
+        self.sim_scenario_combo = ttk.Combobox(
+            parent,
+            textvariable=self.sim_scenario,
+            values=["auto", "random", "sun-earth-moon", "solar-system", "body-file"],
+            state="readonly",
+            width=20,
+        )
+        self.sim_scenario_combo.grid(row=row, column=3, sticky="ew", pady=4)
+        self.sim_rows["scenario"] = [scenario_label, self.sim_scenario_combo]
 
         row += 1
-        ttk.Label(parent, text="N").grid(row=row, column=0, sticky="w", pady=4)
-        ttk.Entry(parent, textvariable=self.sim_n).grid(row=row, column=1, sticky="ew", pady=4)
-        ttk.Label(parent, text="dt, s").grid(row=row, column=2, sticky="w", padx=(16, 0), pady=4)
-        ttk.Entry(parent, textvariable=self.sim_dt).grid(row=row, column=3, sticky="ew", pady=4)
+        n_label = ttk.Label(parent, text="N")
+        n_label.grid(row=row, column=0, sticky="w", pady=4)
+        n_entry = ttk.Entry(parent, textvariable=self.sim_n)
+        n_entry.grid(row=row, column=1, sticky="ew", pady=4)
+        dt_label = ttk.Label(parent, text="dt, s")
+        dt_label.grid(row=row, column=2, sticky="w", padx=(16, 0), pady=4)
+        dt_entry = ttk.Entry(parent, textvariable=self.sim_dt)
+        dt_entry.grid(row=row, column=3, sticky="ew", pady=4)
+        self.sim_rows["n"] = [n_label, n_entry]
+        self.sim_rows["dt"] = [dt_label, dt_entry]
 
         row += 1
         ttk.Label(parent, text="T, hours").grid(row=row, column=0, sticky="w", pady=4)
         ttk.Entry(parent, textvariable=self.sim_t_hours).grid(row=row, column=1, sticky="ew", pady=4)
-        ttk.Label(parent, text="OpenMP threads").grid(row=row, column=2, sticky="w", padx=(16, 0), pady=4)
-        ttk.Entry(parent, textvariable=self.sim_threads).grid(row=row, column=3, sticky="ew", pady=4)
+        threads_label = ttk.Label(parent, text="OpenMP threads")
+        threads_label.grid(row=row, column=2, sticky="w", padx=(16, 0), pady=4)
+        threads_entry = ttk.Entry(parent, textvariable=self.sim_threads)
+        threads_entry.grid(row=row, column=3, sticky="ew", pady=4)
+        self.sim_rows["openmp"] = [threads_label, threads_entry]
 
         row += 1
-        ttk.Label(parent, text="SYCL device").grid(row=row, column=0, sticky="w", pady=4)
-        ttk.Combobox(parent, textvariable=self.sim_device, values=["auto", "cpu", "gpu"],
-                     state="readonly", width=16).grid(row=row, column=1, sticky="ew", pady=4)
+        sycl_label = ttk.Label(parent, text="SYCL device")
+        sycl_label.grid(row=row, column=0, sticky="w", pady=4)
+        sycl_combo = ttk.Combobox(parent, textvariable=self.sim_device, values=["auto", "cpu", "gpu"],
+                                  state="readonly", width=16)
+        sycl_combo.grid(row=row, column=1, sticky="ew", pady=4)
+        self.sim_rows["sycl"] = [sycl_label, sycl_combo]
 
         row += 1
-        ttk.Label(parent, text="Файл тел").grid(row=row, column=0, sticky="w", pady=4)
-        ttk.Entry(parent, textvariable=self.sim_body_file).grid(row=row, column=1, columnspan=2,
-                                                                sticky="ew", pady=4)
-        ttk.Button(parent, text="Выбрать", command=lambda: self._pick_file(self.sim_body_file)).grid(
-            row=row, column=3, sticky="ew", padx=(8, 0), pady=4)
+        body_file_label = ttk.Label(parent, text="Файл тел")
+        body_file_label.grid(row=row, column=0, sticky="w", pady=4)
+        body_file_entry = ttk.Entry(parent, textvariable=self.sim_body_file)
+        body_file_entry.grid(row=row, column=1, columnspan=2, sticky="ew", pady=4)
+        body_file_button = ttk.Button(parent, text="Выбрать", command=lambda: self._pick_file(self.sim_body_file))
+        body_file_button.grid(row=row, column=3, sticky="ew", padx=(8, 0), pady=4)
+        self.sim_rows["body_file"] = [body_file_label, body_file_entry, body_file_button]
 
         row += 1
-        ttk.Label(parent, text="CSV результатов").grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Label(parent, text="Таблица результатов (CSV)").grid(row=row, column=0, sticky="w", pady=4)
         ttk.Entry(parent, textvariable=self.sim_csv).grid(row=row, column=1, columnspan=2,
                                                           sticky="ew", pady=4)
-        ttk.Button(parent, text="Сохранить как", command=lambda: self._pick_save_file(
-            self.sim_csv, [("CSV", "*.csv"), ("All files", "*.*")]
+        ttk.Button(parent, text="Сохранить как", command=lambda: self._pick_results_csv(
+            self.sim_csv
         )).grid(row=row, column=3, sticky="ew", padx=(8, 0), pady=4)
 
         row += 1
-        ttk.Checkbutton(parent, text="Записывать шаги",
+        ttk.Checkbutton(parent, text="Записывать траекторию",
                         variable=self.sim_write_trajectory).grid(row=row, column=0, sticky="w", pady=4)
         ttk.Entry(parent, textvariable=self.sim_trajectory).grid(row=row, column=1, columnspan=2,
                                                                  sticky="ew", pady=4)
-        ttk.Button(parent, text="Сохранить как", command=lambda: self._pick_save_file(
-            self.sim_trajectory,
-            self._trajectory_filetypes(self.sim_trajectory_format.get()),
-            self._trajectory_extension(self.sim_trajectory_format.get()),
-        )).grid(row=row, column=3, sticky="ew", padx=(8, 0), pady=4)
+        ttk.Button(parent, text="Сохранить как", command=self._pick_single_trajectory_file).grid(
+            row=row, column=3, sticky="ew", padx=(8, 0), pady=4)
 
         row += 1
-        ttk.Label(parent, text="Формат шагов").grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Label(parent, text="Формат траектории").grid(row=row, column=0, sticky="w", pady=4)
         ttk.Combobox(parent, textvariable=self.sim_trajectory_format,
                      values=["csv", "binary"], state="readonly", width=16).grid(
             row=row, column=1, sticky="ew", pady=4)
@@ -237,6 +271,7 @@ class NBodyGui:
     def _build_benchmark_tab(self, parent):
         parent.columnconfigure(1, weight=1)
         parent.columnconfigure(3, weight=1)
+        self.bench_rows = {}
 
         row = 0
         ttk.Label(parent, text="Методы").grid(row=row, column=0, sticky="nw", pady=4)
@@ -247,58 +282,74 @@ class NBodyGui:
                 side="left", padx=(0, 14))
 
         row += 1
-        ttk.Label(parent, text="N values").grid(row=row, column=0, sticky="w", pady=4)
-        ttk.Entry(parent, textvariable=self.bench_n_values).grid(row=row, column=1, sticky="ew", pady=4)
-        ttk.Label(parent, text="T hours").grid(row=row, column=2, sticky="w", padx=(16, 0), pady=4)
-        ttk.Entry(parent, textvariable=self.bench_times).grid(row=row, column=3, sticky="ew", pady=4)
+        bench_n_label = ttk.Label(parent, text="N values")
+        bench_n_label.grid(row=row, column=0, sticky="w", pady=4)
+        bench_n_entry = ttk.Entry(parent, textvariable=self.bench_n_values)
+        bench_n_entry.grid(row=row, column=1, sticky="ew", pady=4)
+        bench_times_label = ttk.Label(parent, text="T hours")
+        bench_times_label.grid(row=row, column=2, sticky="w", padx=(16, 0), pady=4)
+        bench_times_entry = ttk.Entry(parent, textvariable=self.bench_times)
+        bench_times_entry.grid(row=row, column=3, sticky="ew", pady=4)
+        self.bench_rows["n_values"] = [bench_n_label, bench_n_entry]
+        self.bench_rows["times"] = [bench_times_label, bench_times_entry]
 
         row += 1
         ttk.Label(parent, text="dt, s").grid(row=row, column=0, sticky="w", pady=4)
         ttk.Entry(parent, textvariable=self.bench_dt).grid(row=row, column=1, sticky="ew", pady=4)
-        ttk.Label(parent, text="Сценарий").grid(row=row, column=2, sticky="w", padx=(16, 0), pady=4)
-        ttk.Combobox(parent, textvariable=self.bench_scenario,
-                     values=["auto-by-n", "auto", "random", "sun-earth-moon", "solar-system", "body-file"],
-                     state="readonly").grid(row=row, column=3, sticky="ew", pady=4)
+        bench_scenario_label = ttk.Label(parent, text="Сценарий")
+        bench_scenario_label.grid(row=row, column=2, sticky="w", padx=(16, 0), pady=4)
+        self.bench_scenario_combo = ttk.Combobox(
+            parent,
+            textvariable=self.bench_scenario,
+            values=["auto-by-n", "auto", "random", "sun-earth-moon", "solar-system", "body-file"],
+            state="readonly",
+        )
+        self.bench_scenario_combo.grid(row=row, column=3, sticky="ew", pady=4)
+        self.bench_rows["scenario"] = [bench_scenario_label, self.bench_scenario_combo]
 
         row += 1
-        ttk.Label(parent, text="OpenMP threads").grid(row=row, column=0, sticky="w", pady=4)
-        ttk.Entry(parent, textvariable=self.bench_threads).grid(row=row, column=1, sticky="ew", pady=4)
-        ttk.Label(parent, text="SYCL device").grid(row=row, column=2, sticky="w", padx=(16, 0), pady=4)
-        ttk.Combobox(parent, textvariable=self.bench_device, values=["auto", "cpu", "gpu"],
-                     state="readonly").grid(row=row, column=3, sticky="ew", pady=4)
+        bench_threads_label = ttk.Label(parent, text="OpenMP threads")
+        bench_threads_label.grid(row=row, column=0, sticky="w", pady=4)
+        bench_threads_entry = ttk.Entry(parent, textvariable=self.bench_threads)
+        bench_threads_entry.grid(row=row, column=1, sticky="ew", pady=4)
+        bench_device_label = ttk.Label(parent, text="SYCL device")
+        bench_device_label.grid(row=row, column=2, sticky="w", padx=(16, 0), pady=4)
+        bench_device_combo = ttk.Combobox(parent, textvariable=self.bench_device, values=["auto", "cpu", "gpu"],
+                                          state="readonly")
+        bench_device_combo.grid(row=row, column=3, sticky="ew", pady=4)
+        self.bench_rows["openmp"] = [bench_threads_label, bench_threads_entry]
+        self.bench_rows["sycl"] = [bench_device_label, bench_device_combo]
 
         row += 1
-        ttk.Label(parent, text="Файл тел").grid(row=row, column=0, sticky="w", pady=4)
-        ttk.Entry(parent, textvariable=self.bench_body_file).grid(row=row, column=1, columnspan=2,
-                                                                  sticky="ew", pady=4)
-        ttk.Button(parent, text="Выбрать", command=lambda: self._pick_file(self.bench_body_file)).grid(
-            row=row, column=3, sticky="ew", padx=(8, 0), pady=4)
+        bench_body_file_label = ttk.Label(parent, text="Файл тел")
+        bench_body_file_label.grid(row=row, column=0, sticky="w", pady=4)
+        bench_body_file_entry = ttk.Entry(parent, textvariable=self.bench_body_file)
+        bench_body_file_entry.grid(row=row, column=1, columnspan=2, sticky="ew", pady=4)
+        bench_body_file_button = ttk.Button(
+            parent,
+            text="Выбрать",
+            command=lambda: self._pick_file(self.bench_body_file),
+        )
+        bench_body_file_button.grid(row=row, column=3, sticky="ew", padx=(8, 0), pady=4)
+        self.bench_rows["body_file"] = [
+            bench_body_file_label,
+            bench_body_file_entry,
+            bench_body_file_button,
+        ]
 
         row += 1
-        ttk.Label(parent, text="CSV результатов").grid(row=row, column=0, sticky="w", pady=4)
-        ttk.Entry(parent, textvariable=self.bench_csv).grid(row=row, column=1, columnspan=2,
-                                                            sticky="ew", pady=4)
-        ttk.Button(parent, text="Сохранить как", command=lambda: self._pick_save_file(
-            self.bench_csv, [("CSV", "*.csv"), ("All files", "*.*")]
-        )).grid(row=row, column=3, sticky="ew", padx=(8, 0), pady=4)
-
-        row += 1
-        ttk.Label(parent, text="Папка графиков").grid(row=row, column=0, sticky="w", pady=4)
-        ttk.Entry(parent, textvariable=self.bench_plots).grid(row=row, column=1, columnspan=2,
-                                                              sticky="ew", pady=4)
-        ttk.Button(parent, text="Выбрать", command=lambda: self._pick_directory(self.bench_plots)).grid(
-            row=row, column=3, sticky="ew", padx=(8, 0), pady=4)
-
-        row += 1
-        ttk.Checkbutton(parent, text="Записывать шаги",
-                        variable=self.bench_write_trajectory).grid(row=row, column=0, sticky="w", pady=4)
-        ttk.Entry(parent, textvariable=self.bench_trajectory).grid(row=row, column=1, columnspan=2,
+        ttk.Label(parent, text="Папка прогона").grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Entry(parent, textvariable=self.bench_output_dir).grid(row=row, column=1, columnspan=2,
                                                                    sticky="ew", pady=4)
-        ttk.Button(parent, text="Выбрать", command=lambda: self._pick_directory(self.bench_trajectory)).grid(
+        ttk.Button(parent, text="Выбрать", command=lambda: self._pick_directory(self.bench_output_dir)).grid(
             row=row, column=3, sticky="ew", padx=(8, 0), pady=4)
 
         row += 1
-        ttk.Label(parent, text="Формат шагов").grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Checkbutton(parent, text="Записывать траектории",
+                        variable=self.bench_write_trajectory).grid(row=row, column=0, sticky="w", pady=4)
+
+        row += 1
+        ttk.Label(parent, text="Формат траекторий").grid(row=row, column=0, sticky="w", pady=4)
         ttk.Combobox(parent, textvariable=self.bench_trajectory_format,
                      values=["csv", "binary"], state="readonly", width=16).grid(
             row=row, column=1, sticky="ew", pady=4)
@@ -306,11 +357,17 @@ class NBodyGui:
         row += 1
         options = ttk.Frame(parent)
         options.grid(row=row, column=0, columnspan=4, sticky="w", pady=(8, 4))
-        ttk.Checkbutton(options, text="Перезаписать CSV", variable=self.bench_force).pack(side="left")
+        ttk.Checkbutton(options, text="Перезаписать таблицу", variable=self.bench_force).pack(side="left")
         ttk.Checkbutton(options, text="Строить графики", variable=self.bench_make_plots).pack(
             side="left", padx=(18, 0))
         ttk.Checkbutton(options, text="Пропускать долгие случаи",
                         variable=self.bench_default_skips).pack(side="left", padx=(18, 0))
+        ttk.Checkbutton(options, text="Мониторинг ресурсов",
+                        variable=self.bench_monitor_resources).pack(side="left", padx=(18, 0))
+        self.bench_monitor_interval_label = ttk.Label(options, text="Интервал, s")
+        self.bench_monitor_interval_label.pack(side="left", padx=(18, 4))
+        self.bench_monitor_interval_entry = ttk.Entry(options, textvariable=self.bench_monitor_interval, width=6)
+        self.bench_monitor_interval_entry.pack(side="left")
 
         row += 1
         button_frame = ttk.Frame(parent)
@@ -361,6 +418,107 @@ class NBodyGui:
                    command=lambda: self._use_generated_file(self.bench_body_file, self.bench_scenario)).pack(
             side="left", padx=(8, 0))
 
+    def _build_visualization_tab(self, parent):
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(0, weight=1)
+
+        self.trajectory_viewer = TrajectoryViewerFrame(
+            parent,
+            initial_path=self.sim_trajectory.get(),
+            initial_format="auto",
+        )
+        self.trajectory_viewer.grid(row=0, column=0, sticky="nsew")
+
+    def _bind_dynamic_ui(self):
+        self.sim_method.trace_add("write", lambda *_args: self._refresh_simulation_fields())
+        self.sim_scenario.trace_add("write", lambda *_args: self._refresh_simulation_fields())
+        self.bench_scenario.trace_add("write", lambda *_args: self._refresh_benchmark_fields())
+        self.bench_monitor_resources.trace_add("write", lambda *_args: self._refresh_benchmark_fields())
+        for variable in self.method_vars.values():
+            variable.trace_add("write", lambda *_args: self._refresh_benchmark_fields())
+
+    def _refresh_dynamic_ui(self):
+        self._refresh_simulation_fields()
+        self._refresh_benchmark_fields()
+
+    def _set_widgets_visible(self, widgets, visible):
+        for widget in widgets:
+            if visible:
+                widget.grid()
+            else:
+                widget.grid_remove()
+
+    def _fixed_n_for_scenario(self, scenario):
+        if scenario == "sun-earth-moon":
+            return 3
+        if scenario == "solar-system":
+            return 10
+        return None
+
+    def _scenario_uses_n_field(self, scenario):
+        return scenario in {"auto", "random"}
+
+    def _refresh_simulation_fields(self):
+        method = self.sim_method.get()
+        scenario = self.sim_scenario.get()
+        is_two_body = method == benchmark.TWO_BODY_METHOD
+
+        self._set_widgets_visible(self.sim_rows["scenario"], not is_two_body)
+        self._set_widgets_visible(
+            self.sim_rows["n"],
+            not is_two_body and self._scenario_uses_n_field(scenario),
+        )
+        self._place_simulation_dt(not is_two_body and self._scenario_uses_n_field(scenario))
+        self._set_widgets_visible(self.sim_rows["openmp"], method == "openmp")
+        self._set_widgets_visible(self.sim_rows["sycl"], method == "sycl")
+        self._set_widgets_visible(self.sim_rows["body_file"], not is_two_body and scenario == "body-file")
+
+    def _place_simulation_dt(self, n_visible):
+        label, entry = self.sim_rows["dt"]
+        if n_visible:
+            label.grid_configure(column=2, sticky="w", padx=(16, 0))
+            entry.grid_configure(column=3, sticky="ew")
+        else:
+            label.grid_configure(column=0, sticky="w", padx=(0, 0))
+            entry.grid_configure(column=1, sticky="ew")
+
+    def _selected_benchmark_methods(self, allow_empty=False):
+        methods = [method for method, var in self.method_vars.items() if var.get()]
+        if not methods and not allow_empty:
+            raise ValueError("Выбери хотя бы один метод")
+        return methods
+
+    def _benchmark_has_nbody_method(self, methods):
+        return any(method != benchmark.TWO_BODY_METHOD for method in methods)
+
+    def _refresh_benchmark_fields(self):
+        methods = self._selected_benchmark_methods(allow_empty=True)
+        has_nbody_method = self._benchmark_has_nbody_method(methods)
+        uses_body_file = has_nbody_method and self.bench_scenario.get() == "body-file"
+        show_n_values = has_nbody_method and not uses_body_file
+
+        self._set_widgets_visible(self.bench_rows["n_values"], show_n_values)
+        self._place_benchmark_times(show_n_values)
+        self._set_widgets_visible(self.bench_rows["scenario"], has_nbody_method)
+        self._set_widgets_visible(self.bench_rows["body_file"], uses_body_file)
+        self._set_widgets_visible(self.bench_rows["openmp"], "openmp" in methods)
+        self._set_widgets_visible(self.bench_rows["sycl"], "sycl" in methods)
+        if self.bench_monitor_resources.get():
+            self.bench_monitor_interval_label.pack(side="left", padx=(18, 4))
+            self.bench_monitor_interval_entry.pack(side="left")
+        else:
+            self.bench_monitor_interval_label.pack_forget()
+            self.bench_monitor_interval_entry.pack_forget()
+
+    def _place_benchmark_times(self, n_values_visible):
+        label, entry = self.bench_rows["times"]
+        if n_values_visible:
+            label.grid_configure(column=2, sticky="w", padx=(16, 0))
+            entry.grid_configure(column=3, sticky="ew")
+        else:
+            label.grid_configure(column=0, sticky="w", padx=(0, 0))
+            entry.grid_configure(column=1, sticky="ew")
+
     def _build_log(self):
         frame = ttk.Frame(self.root, padding=(10, 0, 10, 10))
         frame.grid(row=1, column=0, sticky="nsew")
@@ -396,6 +554,28 @@ class NBodyGui:
         if path:
             variable.set(path)
 
+    def _pick_results_csv(self, variable):
+        path = filedialog.asksaveasfilename(
+            initialdir=str(ROOT),
+            filetypes=[("CSV", "*.csv"), ("All files", "*.*")],
+            defaultextension=".csv",
+        )
+        if path:
+            variable.set(self._path_with_suffix(path, ".csv"))
+
+    def _pick_single_trajectory_file(self):
+        trajectory_format = self.sim_trajectory_format.get()
+        path = filedialog.asksaveasfilename(
+            initialdir=str(ROOT),
+            filetypes=self._trajectory_filetypes(trajectory_format),
+            defaultextension=self._trajectory_extension(trajectory_format),
+        )
+        if path:
+            self._set_sim_trajectory_path(
+                self._trajectory_path_with_format_extension(path, trajectory_format),
+                auto=False,
+            )
+
     def _pick_directory(self, variable):
         path = filedialog.askdirectory(initialdir=str(ROOT))
         if path:
@@ -406,19 +586,81 @@ class NBodyGui:
 
     def _trajectory_filetypes(self, trajectory_format):
         if trajectory_format == "binary":
-            return [("Binary trajectory", "*.bin"), ("CSV", "*.csv"), ("All files", "*.*")]
-        return [("CSV", "*.csv"), ("Binary trajectory", "*.bin"), ("All files", "*.*")]
+            return [("Binary trajectory", "*.bin"), ("All files", "*.*")]
+        return [("CSV trajectory", "*.csv"), ("All files", "*.*")]
 
     def _default_trajectory_file(self, trajectory_format):
         return RESULTS_DIR / f"trajectory{self._trajectory_extension(trajectory_format)}"
 
-    def _single_trajectory_path(self, trajectory_format):
+    def _path_with_suffix(self, path, extension):
+        path = str(path).strip()
+        if not path:
+            return ""
+        path_obj = Path(path)
+        if path_obj.suffix.lower() != extension:
+            path_obj = path_obj.with_suffix(extension)
+        return str(path_obj)
+
+    def _trajectory_path_with_format_extension(self, path, trajectory_format):
+        return self._path_with_suffix(path, self._trajectory_extension(trajectory_format))
+
+    def _on_sim_trajectory_format_changed(self, *_args):
+        trajectory_format = self.sim_trajectory_format.get()
+        path = self.sim_trajectory.get().strip() or str(self._default_trajectory_file(trajectory_format))
+        normalized = self._trajectory_path_with_format_extension(path, trajectory_format)
+        if normalized != path:
+            self._set_sim_trajectory_path(normalized, auto=self.sim_trajectory_auto_path)
+
+    def _on_sim_trajectory_changed(self, *_args):
+        if not self._updating_sim_trajectory:
+            self.sim_trajectory_auto_path = False
+
+    def _set_sim_trajectory_path(self, path, auto=None):
+        self._updating_sim_trajectory = True
+        try:
+            self.sim_trajectory.set(str(path))
+        finally:
+            self._updating_sim_trajectory = False
+        if auto is not None:
+            self.sim_trajectory_auto_path = auto
+
+    def _safe_filename_part(self, value):
+        cleaned = "".join(ch.lower() if ch.isalnum() else "_" for ch in str(value))
+        cleaned = "_".join(part for part in cleaned.split("_") if part)
+        return cleaned or "run"
+
+    def _resolved_single_scenario_name(self, n_bodies, scenario, body_file):
+        if body_file:
+            return Path(body_file).stem
+        if scenario == "sun-earth":
+            return "sun-earth"
+        if scenario == "auto":
+            return benchmark.SCENARIO_BY_N.get(n_bodies, "random")
+        return scenario
+
+    def _generated_single_trajectory_file(self, trajectory_format, method, n_bodies, t_hours, scenario, body_file):
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        scenario_name = self._safe_filename_part(
+            self._resolved_single_scenario_name(n_bodies, scenario, body_file)
+        )
+        t_part = self._safe_filename_part(f"{t_hours:g}h")
+        extension = self._trajectory_extension(trajectory_format)
+        filename = f"single_{method}_{scenario_name}_n{n_bodies}_t{t_part}_{timestamp}{extension}"
+        return RESULTS_DIR / "trajectories" / filename
+
+    def _single_trajectory_path(self, trajectory_format, method, n_bodies, t_hours, scenario, body_file):
         path = self.sim_trajectory.get().strip()
         default_csv = str(self._default_trajectory_file("csv"))
         default_bin = str(self._default_trajectory_file("binary"))
-        if not path or path in {default_csv, default_bin}:
-            path = str(self._default_trajectory_file(trajectory_format))
-            self.sim_trajectory.set(path)
+        if self.sim_trajectory_auto_path or not path or path in {default_csv, default_bin}:
+            path = str(self._generated_single_trajectory_file(
+                trajectory_format, method, n_bodies, t_hours, scenario, body_file
+            ))
+            self._set_sim_trajectory_path(path, auto=True)
+        normalized = self._trajectory_path_with_format_extension(path, trajectory_format)
+        if normalized != path:
+            self._set_sim_trajectory_path(normalized, auto=self.sim_trajectory_auto_path)
+            path = normalized
         return path
 
     def _append_log(self, text):
@@ -560,12 +802,6 @@ class NBodyGui:
             raise ValueError(f"{name}: список не должен быть пустым")
         return values
 
-    def _selected_benchmark_methods(self):
-        methods = [method for method, var in self.method_vars.items() if var.get()]
-        if not methods:
-            raise ValueError("Выбери хотя бы один метод")
-        return methods
-
     def _build_command_for_methods(self, methods):
         return ["make", "all-sycl" if "sycl" in methods else "all"]
 
@@ -589,16 +825,33 @@ class NBodyGui:
             return "auto", body_file
         return scenario, None
 
+    def _single_run_body_count(self, scenario, body_file):
+        if body_file:
+            body_count = count_body_rows(body_file)
+            if body_count < 1:
+                raise ValueError("Файл тел не содержит ни одного тела")
+            return body_count
+        fixed_count = self._fixed_n_for_scenario(scenario)
+        if fixed_count is not None:
+            return fixed_count
+        return self._int_value(self.sim_n, "N")
+
     def run_single_simulation(self):
         try:
             method = self.sim_method.get()
-            n_bodies = self._int_value(self.sim_n, "N")
             dt_s = self._float_value(self.sim_dt, "dt")
             t_hours = self._float_value(self.sim_t_hours, "T")
-            threads = self._int_value(self.sim_threads, "OpenMP threads")
-            scenario, body_file = self._scenario_and_body_file(self.sim_scenario, self.sim_body_file)
+            threads = self._int_value(self.sim_threads, "OpenMP threads") if method == "openmp" else 1
+            if method == benchmark.TWO_BODY_METHOD:
+                n_bodies = 2
+                scenario, body_file = "sun-earth", None
+            else:
+                scenario, body_file = self._scenario_and_body_file(self.sim_scenario, self.sim_body_file)
+                n_bodies = self._single_run_body_count(scenario, body_file)
             trajectory_format = self.sim_trajectory_format.get()
-            trajectory_file = self._single_trajectory_path(trajectory_format) if self.sim_write_trajectory.get() else ""
+            trajectory_file = self._single_trajectory_path(
+                trajectory_format, method, n_bodies, t_hours, scenario, body_file
+            ) if self.sim_write_trajectory.get() else ""
         except ValueError as exc:
             messagebox.showerror("Ошибка параметров", str(exc))
             return
@@ -608,11 +861,15 @@ class NBodyGui:
             messagebox.showerror("Бинарник не найден", "Сначала собери выбранный метод.")
             return
 
-        command = [exe_path, n_bodies, dt_s, t_hours * 3600.0]
+        if method == benchmark.TWO_BODY_METHOD:
+            command = [exe_path, dt_s, t_hours * 3600.0, "--scenario", scenario]
+        else:
+            command = [exe_path, n_bodies, dt_s, t_hours * 3600.0]
         if method == "openmp":
             command.append(threads)
-        command.append(scenario)
-        if body_file:
+        if method != benchmark.TWO_BODY_METHOD:
+            command.append(scenario)
+        if body_file and method != benchmark.TWO_BODY_METHOD:
             command.extend(["--bodies", body_file])
         if method == "sycl":
             command.extend(["--device", self.sim_device.get()])
@@ -634,14 +891,16 @@ class NBodyGui:
                          threads, scenario, body_file, trajectory_file, trajectory_format, command):
         if returncode != 0:
             return
-        csv_path = self.sim_csv.get().strip()
+        csv_path = self._path_with_suffix(self.sim_csv.get(), ".csv")
         if not csv_path:
             return
+        if csv_path != self.sim_csv.get().strip():
+            self.sim_csv.set(csv_path)
         try:
             metrics = benchmark.parse_metrics(output)
-            actual_n = count_body_rows(body_file) if body_file else n_bodies
+            actual_n = self._actual_body_count(method, n_bodies, scenario, body_file)
             reported_threads = metrics.get("threads", 0)
-            if method == "serial":
+            if method in {"serial", benchmark.TWO_BODY_METHOD}:
                 reported_threads = 1
             elif method == "openmp" and reported_threads == 0:
                 reported_threads = threads
@@ -670,37 +929,63 @@ class NBodyGui:
             }
             benchmark.save_results([row], csv_path)
             self._append_log(f"Saved run metrics to {csv_path}\n")
+            if trajectory_file and hasattr(self, "trajectory_viewer"):
+                self.trajectory_viewer.set_path(trajectory_file, trajectory_format)
         except Exception as exc:
             messagebox.showerror("CSV не сохранен", str(exc))
 
+    def _actual_body_count(self, method, n_bodies, scenario, body_file):
+        if method == benchmark.TWO_BODY_METHOD:
+            return 2
+        if body_file:
+            return count_body_rows(body_file)
+        resolved = benchmark.SCENARIO_BY_N.get(n_bodies, "random") if scenario == "auto" else scenario
+        if resolved == "sun-earth-moon":
+            return 3
+        if resolved == "solar-system":
+            return 10
+        return n_bodies
+
     def _benchmark_config_from_ui(self):
         methods = self._selected_benchmark_methods()
+        has_nbody_method = self._benchmark_has_nbody_method(methods)
         scenario_choice = self.bench_scenario.get()
         scenario = None
         body_file = None
-        if scenario_choice == "body-file":
+        if has_nbody_method and scenario_choice == "body-file":
             body_file = self.bench_body_file.get().strip()
             if not body_file:
                 raise ValueError("Для сценария body-file нужен файл тел")
             scenario = "auto"
-        elif scenario_choice != "auto-by-n":
+        elif has_nbody_method and scenario_choice != "auto-by-n":
             scenario = scenario_choice
 
         config = {
             "methods": methods,
-            "n_values": self._number_list(self.bench_n_values, int, "N values"),
+            "n_values": (
+                [count_body_rows(body_file)] if body_file else
+                self._number_list(self.bench_n_values, int, "N values") if has_nbody_method else
+                [2]
+            ),
             "times_hours": self._number_list(self.bench_times, float, "T hours"),
             "dt_s": self._float_value(self.bench_dt, "dt"),
             "scenario": scenario,
             "scenario_by_n": {str(key): value for key, value in benchmark.SCENARIO_BY_N.items()},
             "body_file": body_file,
-            "openmp_threads": self._int_value(self.bench_threads, "OpenMP threads"),
+            "openmp_threads": (
+                self._int_value(self.bench_threads, "OpenMP threads")
+                if "openmp" in methods else (os.cpu_count() or 1)
+            ),
             "device": self.bench_device.get(),
-            "results_csv": self.bench_csv.get().strip(),
-            "plots_dir": self.bench_plots.get().strip(),
-            "trajectory_dir": self.bench_trajectory.get().strip() if self.bench_write_trajectory.get() else None,
+            "output_dir": self.bench_output_dir.get().strip() or None,
+            "results_csv": None,
+            "plots_dir": None,
+            "resource_csv": None,
+            "trajectory_dir": "trajectories" if self.bench_write_trajectory.get() else None,
             "trajectory_format": self.bench_trajectory_format.get(),
             "use_default_skips": self.bench_default_skips.get(),
+            "monitor_resources": self.bench_monitor_resources.get(),
+            "monitor_interval_s": self._float_value(self.bench_monitor_interval, "Интервал мониторинга"),
         }
         return benchmark.normalize_benchmark_config(config)
 
@@ -769,13 +1054,12 @@ class NBodyGui:
             self.bench_dt.set(str(config["dt_s"]))
             self.bench_threads.set(str(config["openmp_threads"]))
             self.bench_device.set(config["device"])
-            self.bench_csv.set(config["results_csv"])
-            self.bench_plots.set(config["plots_dir"])
+            self.bench_output_dir.set(config.get("output_dir") or "")
             self.bench_write_trajectory.set(bool(config.get("trajectory_dir")))
             self.bench_trajectory_format.set(config.get("trajectory_format", "csv"))
-            if config.get("trajectory_dir"):
-                self.bench_trajectory.set(config["trajectory_dir"])
             self.bench_default_skips.set(config["use_default_skips"])
+            self.bench_monitor_resources.set(config["monitor_resources"])
+            self.bench_monitor_interval.set(str(config["monitor_interval_s"]))
             if config.get("body_file"):
                 self.bench_scenario.set("body-file")
                 self.bench_body_file.set(config["body_file"])
@@ -783,6 +1067,7 @@ class NBodyGui:
                 self.bench_scenario.set(config["scenario"])
             else:
                 self.bench_scenario.set("auto-by-n")
+            self._refresh_dynamic_ui()
             self._append_log(f"Loaded benchmark configuration from {path}\n")
         except Exception as exc:
             messagebox.showerror("JSON не загружен", str(exc))
@@ -810,6 +1095,7 @@ class NBodyGui:
         if path:
             body_file_var.set(path)
             scenario_var.set("body-file")
+            self._refresh_dynamic_ui()
 
 
 def main():
